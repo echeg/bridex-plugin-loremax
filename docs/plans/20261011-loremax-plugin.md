@@ -141,18 +141,18 @@
       pair) and also parses an SSE-framed reply; errors carry `status`/`body` for the task 4 `failed` path and the check
 
 ### Task 2: `loremax_workflows` — list, fields and price
-- [ ] register `loremax_workflows` with schema `{ workflow_id?: string, query?: string }` and a description saying it is
+- [x] register `loremax_workflows` with schema `{ workflow_id?: string, query?: string }` and a description saying it is
       free, lists the organization's workflows, and with `workflow_id` returns the input fields and price — read it before
       a paid `loremax_generate`
-- [ ] without `workflow_id`: `GET /api/v1/workflows`, map to `{id, visual_id, title, category, description ≤ 200 chars}`,
+- [x] without `workflow_id`: `GET /api/v1/workflows`, map to `{id, visual_id, title, category, description ≤ 200 chars}`,
       filter by `query` (case-insensitive substring over title/description/visual_id/category), reply `{workflows, hint}`
-- [ ] with `workflow_id`: `mcpCall("get_workflow_details", { workflowId })` → `{ workflow: {id, visual_id, title, category,
+- [x] with `workflow_id`: `mcpCall("get_workflow_details", { workflowId })` → `{ workflow: {id, visual_id, title, category,
       description}, input_fields, usage_hint, pricing_variables_required? }`, then `mcpCall("get_pricing", { workflowId })`
       → `token_cost` (price failure is reported as `price: "unavailable: <reason>"`, not a tool error); cap the reply at
       14 000 chars like `fal_schema`
-- [ ] write tests `test/workflows.test.mjs`: list mapping and query filter; details merge fields + price; details with a
+- [x] write tests `test/workflows.test.mjs`: list mapping and query filter; details merge fields + price; details with a
       failing `get_pricing` still returns fields; unknown workflow → LoreMax error text surfaces
-- [ ] run `npm test` - must pass before task 3
+- [x] run `npm test` - must pass before task 3
 
 ### Task 3: Output saving with provenance
 - [ ] add `resolveLocal(ws, p)` (copy of fal's jail: `artifacts/…` → `paths.workspaceArtifacts`, else relative to

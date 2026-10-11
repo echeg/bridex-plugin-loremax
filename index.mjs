@@ -19,7 +19,9 @@ const DEFAULT_BASE_URL = "https://loremax.ai";
 /** LoreMax asks for Retry-After on 429; never sleep longer than this inside a tool call. */
 const RETRY_AFTER_CAP_S = 30;
 const RETRY_AFTER_DEFAULT_S = 5;
-const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
+/** Tool replies go into the agent's context: keep a workflow's field dump bounded (as fal_schema does). */
+const REPLY_CAP = 14_000;
+const KEY_HINT ="LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
 
 const resolveRef = (ref) => String(ref ?? "").replace(/\$\{([A-Z0-9_]+)\}/g, (_, n) => process.env[n] ?? "");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -157,6 +159,53 @@ export default async function activate(ctx) {
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
+
+  const { z } = ctx;
+  const text = (t) => ({ content: [{ type: "text", text: t }] });
+  const cap =(s, n = REPLY_CAP) => (s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s);
+  const short = (s, n = 200) => String(s ?? "").slice(0, n);
+
+  ctx.registerTool({
+    name: "loremax_workflows",
+    description:
+      "LoreMax workflows of this organization (free). Without workflow_id: the list (id, visual_id, title, category), optionally filtered by query. With workflow_id: that workflow's input fields (keys, types, options) and its price in LoreMax tokens — ALWAYS read it before a paid loremax_generate: inputs are passed through exactly as these fields name them.",
+    schema: {
+      workflow_id: z.string().optional().describe("numeric id or visual id from the list; returns input fields and price"),
+      query: z.string().optional().describe("case-insensitive filter over title, description, visual id and category"),
+    },
+    handler: async (args) => {
+      const id = String(args.workflow_id ?? "").trim();
+      if (!id) {
+        const r = await lmx.restJson("/api/v1/workflows");
+        const q = String(args.query ?? "").trim().toLowerCase();
+        const workflows = (r.workflows ?? [])
+          .map((w) => ({ id: w.id, visual_id: w.visualId, title: w.title, category: w.category, description: short(w.description) }))
+          .filter((w) => !q || [w.title, w.description, w.visual_id, w.category].some((v) => String(v ?? "").toLowerCase().includes(q)));
+        return text(cap(JSON.stringify({
+          workflows,
+          hint: workflows.length
+            ? "call loremax_workflows with workflow_id to read its input fields and price before loremax_generate"
+            : q ? `no workflow matches "${args.query}" — call without query for the full list` : "this organization has no workflows",
+        }, null, 1)));
+      }
+      const d = await lmx.mcpCall("get_workflow_details", { workflowId: id });
+      const w = d?.workflow ?? d ?? {};
+      const out = {
+        workflow: { id: w.id ?? id, visual_id: w.visualId ?? w.visual_id, title: w.title, category: w.category, description: w.description },
+        input_fields: d?.input_fields ?? [],
+        usage_hint: d?.usage_hint,
+        ...(d?.pricing_variables_required ? { pricing_variables_required: d.pricing_variables_required } : {}),
+      };
+      // the price is a courtesy: a pricing hiccup must not hide the fields the agent needs
+      try {
+        const p = await lmx.mcpCall("get_pricing", { workflowId: id });
+        out.token_cost = p?.tokenCost ?? p?.token_cost;
+      } catch (e) {
+        out.price = `unavailable: ${short(e?.message ?? e)}`;
+      }
+      return text(cap(JSON.stringify(out, null, 1)));
+    },
+  });
 
   ctx.log.info("loremax plugin active");
 }
