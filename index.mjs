@@ -49,7 +49,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Retry-After in seconds (the HTTP-date form is not used by LoreMax) → ms, capped. */
 function retryAfterMs(header) {
-  const s = Number(header);
+  // a missing header is null and Number(null) is 0: that would retry at once
+  const s = header == null || header === "" ? NaN : Number(header);
   return Math.min(Number.isFinite(s) && s >= 0 ? s : RETRY_AFTER_DEFAULT_S, RETRY_AFTER_CAP_S) * 1000;
 }
 
@@ -416,8 +417,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
   /**
    * Generation ids a tool call or the watcher is polling right now: the others
    * leave them alone so one generation is never downloaded and settled twice.
+   * Process-wide, not per activation: an update or dashboard toggle re-activates
+   * (re-imports) the plugin while the old instance's tool calls are still polling.
    */
-  const inFlight = new Set();
+  const inFlight = (globalThis[Symbol.for("bridex.loremax.inFlight")] ??= new Set());
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
@@ -698,6 +701,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
           inFlight.delete(j.externalId);
         }
       }
+    } catch (e) {
+      // a jobs-table error must not become an unhandled rejection from setInterval
+      ctx.log.warn(`loremax watcher: ${e?.message ?? e}`);
     } finally {
       watching = false;
     }

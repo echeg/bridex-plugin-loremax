@@ -326,6 +326,40 @@ test("watcher: a job a tool call finished while the pass was busy elsewhere is n
   assert.match(s.rec.wakes[0].prompt, /501/);
 });
 
+test("a re-activated plugin's watcher leaves alone a generation the old instance's tool call is saving", async () => {
+  const s = await setup();
+  s.track();
+  // update / dashboard toggle: activate() runs again on the same host while the old tool call polls
+  const fresh = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const f = mockFetch([
+    checkRoute(s, [DONE]),
+    ["GET", `${CDN}/out.png`, async () => {
+      await gate;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+  ]);
+  restore = f.restore;
+  const replying = s.run({ generation_id: "501", wait_s: 5 });
+  await new Promise((r) => setTimeout(r, 10));
+  const watching = fresh.watchOnce();
+  await new Promise((r) => setTimeout(r, 10));
+  release();
+  const [reply] = await Promise.all([replying, watching]);
+  assert.equal(reply.status, "completed");
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/out.png")).length, 1);
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.wakes.length, 0);
+});
+
+test("watcher: a jobs-table error is logged, not thrown out of the interval", async () => {
+  const s = await setup({ ctxPatch: {} });
+  s.ctx.jobs.pending = () => { throw new Error("SQLITE_BUSY"); };
+  await s.watchOnce();
+  assert.ok(s.rec.logs.some((l) => l.level === "warn" && /SQLITE_BUSY/.test(l.msg)));
+});
+
 test("loremax_result: a failed job of another workspace is refused (the host's find() has no workspace)", async () => {
   const s = await setup();
   // like the real host: find() returns only id, status, result and error
