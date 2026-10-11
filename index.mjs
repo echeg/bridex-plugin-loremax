@@ -608,7 +608,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       if (inFlight.has(generationId))
         return text(JSON.stringify({ generation_id: generationId, status: "in_progress", hint: "being checked and saved right now — call loremax_result again in a moment" }, null, 1));
       // after a restart only the job row is left: its workflow, params (or label) and task
-      const job = generations.get(generationId) ?? { ...fromRow(generationId, row, found), trackedId: found?.id ?? null };
+      // (the pending row's id when the core has no find(): the job must still settle, or the watcher saves it again)
+      const job = generations.get(generationId) ?? { ...fromRow(generationId, row, found), trackedId: found?.id ?? row?.id ?? null };
       return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, Number(args.wait_s ?? 0) * 1000), null, 1));
     },
   });
@@ -670,7 +671,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         // the list is read once per pass and a pass can take minutes (downloads):
         // a tool call may have finished this one meanwhile — don't save, bill and wake twice
         const cur = ctx.jobs.find?.(j.externalId);
-        if (cur && cur.status !== "running") continue;
+        // cores without find(): a fresh pending() read is the only way to see it
+        const settled = ctx.jobs.find ? cur && cur.status !== "running" : !ctx.jobs.pending().some((p) => p.id === j.id);
+        if (settled) continue;
         inFlight.add(j.externalId);
         const wake = (prompt) =>
           ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-job:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}), prompt });

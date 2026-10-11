@@ -326,6 +326,49 @@ test("watcher: a job a tool call finished while the pass was busy elsewhere is n
   assert.match(s.rec.wakes[0].prompt, /501/);
 });
 
+test("on a core without find(), loremax_result after a restart settles the job: the watcher does not save, bill or wake again", async () => {
+  const s = await setup();
+  delete s.ctx.jobs.find;
+  s.track();
+  const f = mockFetch([checkRoute(s, [DONE]), PNG]);
+  restore = f.restore;
+  const reply = await s.run({ generation_id: "501" });
+  assert.equal(reply.status, "completed");
+  assert.equal(s.jobs[0].status, "succeeded");
+  await s.watchOnce();
+  assert.equal(f.calls.filter((c) => c.url.includes("/check")).length, 1);
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.wakes.length, 0);
+});
+
+test("on a core without find(), the watcher skips a job a tool call finished while the pass was busy elsewhere", async () => {
+  const s = await setup();
+  delete s.ctx.jobs.find;
+  s.track({ externalId: "501" });
+  s.track({ externalId: "502", label: "second" });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const B = { status: "completed", result: { originalUrls: [`${CDN}/b.png`], previewUrls: [], contentTypes: ["image/png"] } };
+  const f = mockFetch([
+    checkRoute(s, [DONE], "501"),
+    checkRoute(s, [B], "502"),
+    ["GET", `${CDN}/out.png`, async () => {
+      await gate;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+    ["GET", `${CDN}/b.png`, () => new Response("B", { headers: { "content-type": "image/png" } })],
+  ]);
+  restore = f.restore;
+  const watching = s.watchOnce();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal((await s.run({ generation_id: "502", wait_s: 5 })).status, "completed");
+  release();
+  await watching;
+  assert.equal(f.calls.filter((c) => c.url.includes("/502/check")).length, 1);
+  assert.equal(s.rec.usage.length, 2);
+  assert.equal(s.rec.wakes.length, 1);
+});
+
 test("a re-activated plugin's watcher leaves alone a generation the old instance's tool call is saving", async () => {
   const s = await setup();
   s.track();
