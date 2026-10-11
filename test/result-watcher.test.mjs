@@ -161,20 +161,47 @@ test("watcher: a still-running job is left alone, a failed one is settled and th
   assert.match(s.rec.wakes[0].prompt, /502 .*FAILED: GPU OOM/);
 });
 
-test("watcher: gives up after 6h without a request, and logs (never throws) transient errors", async () => {
+test("watcher: gives up a job still pending after 6h, and logs (never throws) transient errors", async () => {
   const s = await setup();
   s.track();
   s.track({ externalId: "502" });
   s.jobs[0].createdAt = new Date(s.clock.t - 7 * 3_600_000).toISOString();
-  const f = mockFetch([["POST", "/api/v2/generations/502/check", () => new Response("bad gateway", { status: 502 })]]);
+  const f = mockFetch([
+    checkRoute(s, [{ status: "pending" }]),
+    ["POST", "/api/v2/generations/502/check", () => new Response("bad gateway", { status: 502 })],
+  ]);
   restore = f.restore;
   await s.watchOnce();
   assert.equal(s.jobs[0].status, "failed");
   assert.equal(s.jobs[0].error, "gave up after 6h");
-  assert.ok(!f.calls.some((c) => c.url.includes("/501/")));
   assert.match(s.rec.wakes[0].prompt, /6h/);
   assert.equal(s.jobs[1].status, "running");
   assert.ok(s.rec.logs.some((l) => l.level === "warn" && /loremax job 502/.test(l.msg)));
+});
+
+test("watcher: a job past 6h that completed while Bridex was down is still saved, not given up", async () => {
+  const s = await setup();
+  s.track();
+  s.jobs[0].createdAt = new Date(s.clock.t - 9 * 3_600_000).toISOString();
+  const f = mockFetch([checkRoute(s, [DONE]), PNG]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "succeeded");
+  assert.ok(fs.existsSync(path.join(s.art, "task-9/flux-portrait-501.png")));
+  assert.equal(s.rec.usage.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /finished/);
+});
+
+test("watcher: a job past 6h whose /check keeps failing is given up", async () => {
+  const s = await setup();
+  s.track();
+  s.jobs[0].createdAt = new Date(s.clock.t - 7 * 3_600_000).toISOString();
+  const f = mockFetch([checkRoute(s, [new Response("bad gateway", { status: 502 })])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "failed");
+  assert.equal(s.jobs[0].error, "gave up after 6h");
+  assert.match(s.rec.wakes[0].prompt, /6h/);
 });
 
 test("watcher: arms an interval that is cleared on shutdown", async () => {

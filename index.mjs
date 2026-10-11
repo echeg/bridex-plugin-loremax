@@ -680,13 +680,16 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         const what = `LoreMax generation ${j.externalId} (${j.model || "workflow"}${j.label ? ` — ${j.label}` : ""})`;
         const task = j.taskId ? ` (task ${j.taskId})` : "";
         try {
-          if (now() - Date.parse(j.createdAt) > GIVE_UP_MS) {
-            generations.delete(j.externalId);
-            ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error: "gave up after 6h" });
-            wake(`${what} did not finish within 6h and was given up. Check it on LoreMax or run it again${task}.`);
-            continue;
+          const expired = now() - Date.parse(j.createdAt) > GIVE_UP_MS;
+          // ask LoreMax even past 6h: a job that finished while Bridex was down is
+          // paid for and must still be saved — only a still-pending (or unreachable) one is given up
+          let c = null;
+          try {
+            c = await lmx.check(j.externalId);
+          } catch (e) {
+            if (!expired) throw e;
+            ctx.log.warn(`loremax job ${j.externalId}: ${e?.message ?? e}`);
           }
-          const c = await lmx.check(j.externalId);
           if (c?.status === "completed") {
             const job = { ...(generations.get(j.externalId) ?? fromRow(j.externalId, j, cur)), trackedId: j.id };
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
@@ -704,6 +707,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
             const error = `${c.error ?? "unknown error"}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300);
             ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error });
             wake(`${what} FAILED: ${error}. Decide whether to retry (other inputs or workflow) or report the blocker${task}.`);
+          } else if (expired) {
+            generations.delete(j.externalId);
+            ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error: "gave up after 6h" });
+            wake(`${what} did not finish within 6h and was given up. Check it on LoreMax or run it again${task}.`);
           }
         } catch (e) {
           // transient (network, rate limit, key): keep polling; the 6h give-up ends a dead one
