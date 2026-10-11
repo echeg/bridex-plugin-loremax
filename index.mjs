@@ -30,6 +30,11 @@ const DOWNLOAD_CAP = 512 * 1024 * 1024;
 const REF_CAP = 20 * 1024 * 1024;
 const MAX_REFS = 20;
 const POLL_MS = 3_000;
+/** The reboot-proof watcher's pass over pending jobs, and when it gives a generation up. */
+const WATCH_MS = 15_000;
+const GIVE_UP_MS = 6 * 3_600_000;
+/** The dashboard polls stat tiles; LoreMax's balance is read at most once a minute. */
+const BALANCE_TTL_MS = 60_000;
 const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
 
 const EXT_BY_MIME = {
@@ -434,9 +439,60 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       const job = { generationId, workflow, inputs, references, tokensCost, trackedId, note };
       generations.set(generationId, job);
 
-      const waitMs = Number(args.wait_s ?? lmx.cfg.default_wait_s) * 1000;
+      return text(JSON.stringify(await waitFor(call, job, Number(args.wait_s ?? lmx.cfg.default_wait_s) * 1000), null, 1));
+    },
+  });
+
+  ctx.registerTool({
+    name: "loremax_result",
+    description:
+      "Status / result of a LoreMax generation (a generation_id from loremax_generate that ran out of wait time). Completed outputs are saved into artifacts exactly like loremax_generate does; an already finished one returns its saved paths. Free.",
+    schema: {
+      generation_id: z.string().describe("generation_id from loremax_generate"),
+      wait_s: z.number().int().min(0).max(1500).optional().describe("keep polling this long (default 0: one check)"),
+    },
+    handler: async (args, call) => {
+      const generationId = String(args.generation_id ?? "").trim();
+      if (!generationId) throw new Error("generation_id is required — loremax_generate hands it back");
+      const found = ctx.jobs?.find?.(generationId) ?? null;
+      // settled already (by the tool or the watcher): the files are on disk, no new download
+      if (found?.status === "succeeded") {
+        const r = found.result ?? {};
+        const artifacts = r.artifacts ?? [];
+        return text(JSON.stringify({
+          generation_id: generationId,
+          status: "completed",
+          artifacts,
+          tokens_cost: Number(r.tokensCost) || 0,
+          hint: artifacts.length ? "reference outputs as [media: artifacts/<path>]" : "the generation completed but returned no files to save",
+        }, null, 1));
+      }
+      if (found?.status === "failed") return text(JSON.stringify({ generation_id: generationId, status: "failed", error: found.error }, null, 1));
+      const row = ctx.jobs?.pending().find((j) => j.externalId === generationId);
+      // after a restart only the job row is left: its workflow, label and task
+      const job = generations.get(generationId) ?? {
+        generationId,
+        workflow: row?.model ?? "",
+        note: row?.label ?? "",
+        trackedId: found?.id ?? null,
+      };
+      return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, Number(args.wait_s ?? 0) * 1000), null, 1));
+    },
+  });
+
+  /**
+   * Generation ids a tool call is polling right now: the watcher leaves them
+   * alone so one generation is never downloaded and settled twice.
+   */
+  const inFlight = new Set();
+
+  /** Poll /check until completed (→ finish), failed (→ settle + throw) or waitMs runs out (→ in_progress reply). */
+  async function waitFor(call, job, waitMs) {
+    const { generationId, trackedId } = job;
+    inFlight.add(generationId);
+    try {
       const started = now();
-      while (now() - started < waitMs) {
+      for (;;) {
         let c;
         try {
           c = await lmx.check(generationId);
@@ -446,27 +502,116 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         }
         if (c?.status === "completed") {
           generations.delete(generationId);
-          return text(JSON.stringify(await outputs.finish(call, job, c), null, 1));
+          return await outputs.finish(call, job, c);
         }
         if (c?.status === "failed") {
           generations.delete(generationId);
           const error = String(c.error ?? "unknown error");
-          if (trackedId) ctx.jobs.settle(trackedId, { status: "failed", error: `${error}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300) });
+          if (trackedId && ctx.jobs) ctx.jobs.settle(trackedId, { status: "failed", error: `${error}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300) });
           throw new Error(`LoreMax generation ${generationId} failed: ${error}`);
         }
+        if (now() - started >= waitMs) break;
         await sleep(pollMs);
       }
-      const waited = Math.round(waitMs / 1000);
-      return text(JSON.stringify({
-        generation_id: generationId,
-        status: "in_progress",
-        tokens_cost: tokensCost,
-        hint: ctx.jobs
-          ? `still rendering after ${waited}s — end your turn if nothing else is pending: you will be WOKEN when it lands (or poll loremax_result)`
-          : `still rendering after ${waited}s — call loremax_result with this generation_id (the work continues on LoreMax's side)`,
-      }, null, 1));
-    },
+    } finally {
+      inFlight.delete(generationId);
+    }
+    const waited = Math.round(waitMs / 1000);
+    return {
+      generation_id: String(generationId),
+      status: "in_progress",
+      tokens_cost: Number(job.tokensCost) || 0,
+      hint: ctx.jobs
+        ? `still rendering after ${waited}s — end your turn if nothing else is pending: you will be WOKEN when it lands (or poll loremax_result)`
+        : `still rendering after ${waited}s — call loremax_result with this generation_id (the work continues on LoreMax's side)`,
+    };
+  }
+
+  // Reboot-proof: pending generations from the job rows are polled here, so a
+  // run that died mid-wait (restart, crash, wait budget) still gets its
+  // outputs saved and the agent woken in the session it came from.
+  let watching = false;
+  async function watchOnce() {
+    if (watching || !ctx.jobs) return;
+    watching = true;
+    try {
+      for (const j of ctx.jobs.pending()) {
+        if (inFlight.has(j.externalId)) continue;
+        const wake = (prompt) =>
+          ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-job:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}), prompt });
+        const what = `LoreMax generation ${j.externalId} (${j.model || "workflow"}${j.label ? ` — ${j.label}` : ""})`;
+        const task = j.taskId ? ` (task ${j.taskId})` : "";
+        try {
+          if (now() - Date.parse(j.createdAt) > GIVE_UP_MS) {
+            generations.delete(j.externalId);
+            ctx.jobs.settle(j.id, { status: "failed", error: "gave up after 6h" });
+            wake(`${what} did not finish within 6h and was given up. Check it on LoreMax or run it again${task}.`);
+            continue;
+          }
+          const c = await lmx.check(j.externalId);
+          if (c?.status === "completed") {
+            const job = { ...(generations.get(j.externalId) ?? { generationId: j.externalId, workflow: j.model, note: j.label }), trackedId: j.id };
+            generations.delete(j.externalId);
+            const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
+            const done = await outputs.finish(call, job, c);
+            const list = done.artifacts.map((a) => `artifacts/${a}`).join(", ") || "(LoreMax returned no files)";
+            wake(`${what} finished: ${list} — check them, then continue where you left off${task}.`);
+          } else if (c?.status === "failed") {
+            generations.delete(j.externalId);
+            const error = `${c.error ?? "unknown error"}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300);
+            ctx.jobs.settle(j.id, { status: "failed", error });
+            wake(`${what} FAILED: ${error}. Decide whether to retry (other inputs or workflow) or report the blocker${task}.`);
+          }
+        } catch (e) {
+          // transient (network, rate limit, key): keep polling; the 6h give-up ends a dead one
+          ctx.log.warn(`loremax job ${j.externalId}: ${e?.message ?? e}`);
+        }
+      }
+    } finally {
+      watching = false;
+    }
+  }
+  if (ctx.jobs) {
+    const watcher = setInterval(watchOnce, WATCH_MS);
+    watcher.unref?.();
+    ctx.onShutdown?.(() => clearInterval(watcher));
+  }
+
+  ctx.registerCheck?.(async () => {
+    if (!lmx.hasKey()) return { ok: false, message: "no key: LOREMAX_API_KEY is not set" };
+    try {
+      const b = await lmx.mcpCall("get_balance", {}, 15_000);
+      const remaining = Number(b?.remaining);
+      return remaining > 0
+        ? { ok: true, message: `key works · ${remaining} tk left` }
+        : { ok: false, message: "key works, but the balance is empty — top up LoreMax" };
+    } catch (e) {
+      return { ok: false, message: `LoreMax refused the key (${e?.status ?? short(e?.message ?? e)})` };
+    }
   });
 
-  ctx.log.info("loremax plugin active");
+  // dashboard balance tile; polled by the UI, so cached a minute
+  let balanceCache = { at: -Infinity, tiles: [] };
+  ctx.registerStat?.(async () => {
+    if (!lmx.hasKey()) return [];
+    if (now() - balanceCache.at < BALANCE_TTL_MS) return balanceCache.tiles;
+    try {
+      const b = await lmx.mcpCall("get_balance", {}, 2_500);
+      const remaining = Number(b?.remaining);
+      if (!Number.isFinite(remaining)) return [];
+      const limit = Number(b?.limit);
+      const share = Number.isFinite(limit) && limit > 0 ? Math.max(0, Math.min(1, remaining / limit)) : undefined;
+      const low = remaining <= 0 || (share !== undefined && share < 0.1);
+      const tiles = [{ label: "LoreMax balance", value: `${remaining} tk`, sub: low ? "running out" : "balance", ...(share !== undefined ? { balance: share } : {}), low }];
+      balanceCache = { at: now(), tiles };
+      return tiles;
+    } catch (e) {
+      ctx.log.warn(`loremax balance: ${e?.message ?? e}`);
+      return [];
+    }
+  });
+
+  ctx.log.info(`loremax tools registered (loremax_workflows, loremax_generate, loremax_result)${ctx.jobs ? " + job watcher" : ""}`);
+  // test seam: the host ignores the return value
+  return { watchOnce };
 }

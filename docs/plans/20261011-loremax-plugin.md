@@ -213,26 +213,32 @@
       generation id and a `loremax_result` hint and leaves the job tracked; the in-memory map lives inside `activate`
 
 ### Task 5: `loremax_result`, the reboot-proof watcher, check and balance tile
-- [ ] register `loremax_result` with schema `{ generation_id: string, wait_s?: int 0..1500 }`: find the tracked job via
+- [x] register `loremax_result` with schema `{ generation_id: string, wait_s?: int 0..1500 }`: find the tracked job via
       `ctx.jobs?.find(generation_id)` (a finished one returns its stored `result` without a new download); otherwise poll
       `check` up to `wait_s` (default 0 → one check) and `finish` on completed, `in_progress` reply otherwise; the
       `generation` params come from the in-memory map or, after a restart, `{ workflow: job.model }` only
-- [ ] add the watcher (like fal :364-400): `setInterval` 15 s over `ctx.jobs.pending()`; give up after 6 h with `settle
+- [x] add the watcher (like fal :364-400): `setInterval` 15 s over `ctx.jobs.pending()`; give up after 6 h with `settle
       failed`; `completed` → `finish` then `ctx.wakeAgent({ workspace, agent, key: "loremax-job:<job.id>", sessionKey,
       prompt: "LoreMax generation <id> (<workflow>) finished: <artifacts list> — continue where you left off" })`;
       `failed` → settle failed + wake with the error; errors are logged, never thrown; `unref()` the interval and clear it
       in `ctx.onShutdown`
-- [ ] add `ctx.registerCheck`: no key → `{ ok: false, message: "no key: LOREMAX_API_KEY is not set" }`; `mcpCall("get_balance")`
+- [x] add `ctx.registerCheck`: no key → `{ ok: false, message: "no key: LOREMAX_API_KEY is not set" }`; `mcpCall("get_balance")`
       → `remaining > 0` ? `key works · <remaining> tk left` : `key works, but the balance is empty — top up LoreMax`;
       HTTP/auth failure → `LoreMax refused the key (<status or message>)`
-- [ ] add `ctx.registerStat?.(…)`: one tile `{ label: "LoreMax balance", value: "<remaining> tk", warn: remaining <
+- [x] add `ctx.registerStat?.(…)`: one tile `{ label: "LoreMax balance", value: "<remaining> tk", warn: remaining <
       cfg.low_balance_tokens? }` — skip `low_balance_tokens` unless the stat tile type requires a flag; cache the balance
       60 s; on error return `[]`
-- [ ] write tests `test/result-watcher.test.mjs`: `loremax_result` on a finished job returns the stored result without
+- [x] write tests `test/result-watcher.test.mjs`: `loremax_result` on a finished job returns the stored result without
       fetch; on a pending job polls once and returns `in_progress`; with `wait_s` finishes and saves; the watcher
       finishes a pending job and records `wakeAgent` with the artifacts, settles failed on `failed` and gives up after 6 h
       (fake `createdAt`); `registerCheck` three outcomes; the stat tile caches for 60 s (fetch called once for two reads)
-- [ ] run `npm test` - must pass before task 6
+- [x] run `npm test` - must pass before task 6
+- ➕ note: `loremax_generate` and `loremax_result` share one `waitFor` poll (always one check, then until `wait_s`);
+      generation ids a tool call is polling are skipped by the watcher (no double download/settle); `loremax_result`
+      returns a settled-failed job's error as `status: "failed"`; the watcher wakes the agent on the 6 h give-up too and
+      treats any check error as transient (logged, retried until the give-up); empty balance in the check is `ok: false`
+      (as `media` does); the tile carries `balance: remaining/limit` and `low` (empty or under 10 %); `activate` returns
+      `{ watchOnce }` as a test seam (the host ignores the return value)
 
 ### Task 6: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented (three tools, check, tile, watcher, provenance with `image_urls`)
