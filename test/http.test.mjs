@@ -1,7 +1,7 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createClient } from "../index.mjs";
-import { fakeCtx, mockFetch, jsonResponse, mcpResult } from "./helpers.mjs";
+import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const client = () => {
@@ -73,8 +73,8 @@ test("restJson: 429 twice → throws loremax 429", async () => {
   assert.equal(f.calls.length, 2);
 });
 
-test("mcpCall builds a stateless tools/call envelope with Bearer and unwraps {success, data}", async () => {
-  const f = mockFetch([["POST", "/api/mcp", (req) => mcpResult({ success: true, data: { remaining: 42 } }, req.json.id)]]);
+test("mcpCall builds a stateless tools/call envelope with Bearer and returns the tool data", async () => {
+  const f = mockFetch([["POST", "/api/mcp", (req) => mcpResult({ remaining: 42 }, req.json.id)]]);
   restore = f.restore;
   const { c } = client();
   assert.deepEqual(await c.mcpCall("get_balance", {}), { remaining: 42 });
@@ -89,23 +89,25 @@ test("mcpCall builds a stateless tools/call envelope with Bearer and unwraps {su
   assert.ok(req.json.id !== undefined);
 });
 
-test("mcpCall accepts structuredContent", async () => {
-  const f = mockFetch([["POST", "/api/mcp", () => jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [], structuredContent: { success: true, data: { tokenCost: 7 } } } })]]);
+test("mcpCall throws LoreMax's error text on an isError tool result", async () => {
+  const f = mockFetch([["POST", "/api/mcp", () => mcpError("Workflow not found: nope")]]);
   restore = f.restore;
-  assert.deepEqual(await client().c.mcpCall("get_pricing", { workflowId: "w" }), { tokenCost: 7 });
+  await assert.rejects(client().c.mcpCall("get_workflow_details", { visual_id: "nope" }), /loremax get_workflow_details: Workflow not found: nope/);
 });
 
-test("mcpCall parses an SSE-framed reply", async () => {
-  const sse = `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ success: true, data: { ok: 1 } }) }] } })}\n\n`;
-  const f = mockFetch([["POST", "/api/mcp", () => new Response(sse, { headers: { "content-type": "text/event-stream" } })]]);
+test("mcpCall: an insufficient-tokens tool error raises the out-of-funds card", async () => {
+  const f = mockFetch([["POST", "/api/mcp", () => mcpError("Insufficient tokens: need 40, have 3")]]);
   restore = f.restore;
-  assert.deepEqual(await client().c.mcpCall("get_balance"), { ok: 1 });
+  const { c, rec } = client();
+  await assert.rejects(c.mcpCall("get_pricing", { workflowId: "w" }), /Insufficient tokens/);
+  assert.equal(rec.outOfFunds.length, 1);
+  assert.equal(rec.outOfFunds[0].provider, "LoreMax");
 });
 
-test("mcpCall throws LoreMax's error text on {success: false}", async () => {
-  const f = mockFetch([["POST", "/api/mcp", () => mcpResult({ success: false, error: "Workflow not found: nope" })]]);
+test("mcpCall: a non-JSON tool text is an error, not data", async () => {
+  const f = mockFetch([["POST", "/api/mcp", () => jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "oops" }] } })]]);
   restore = f.restore;
-  await assert.rejects(client().c.mcpCall("get_workflow_details", { workflowId: "nope" }), /loremax get_workflow_details: Workflow not found: nope/);
+  await assert.rejects(client().c.mcpCall("get_balance"), /loremax get_balance: oops/);
 });
 
 test("mcpCall throws on a JSON-RPC error object", async () => {

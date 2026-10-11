@@ -44,6 +44,14 @@
     `data.pricing_variables_required?`; `get_pricing {workflowId, inputs?}` → `data.tokenCost`; `get_balance {}` →
     `data.{limit, used, remaining}`. Tool results are `{success, data}` or `{success:false, error}` JSON in the
     JSON-RPC result's text content.
+  - ⚠️ corrected in the code review (checked against `McpProtocolHandler.ts:562-601`, `schemas/mcp.ts:366-368`,
+    `execute.ts:567-603`, `check.ts:184-190`): `get_workflow_details` takes `{visual_id}` (numeric ids also resolve),
+    not `{workflowId}`, and returns a flat object (`id, visual_id, title, …, input_fields, usage_hint`); a tool's text
+    content is the `data` itself, and a failed tool sets `isError: true` with `{"error": "…"}` text (no `success`
+    wrapper, no SSE, no `structuredContent`); an execute that finishes right away returns `originalUrls`/`previewUrls`
+    without `async` and its `/check` answers 400, so the plugin saves those outputs directly. The job label carries the
+    token spend (`<note> · <n> tk`) so a restart doesn't lose it. `LOREMAX_BASE_URL` is in `requires_env`, so the host
+    won't start the plugin until it is set — the "empty = default" path only applies to `config.base_url`.
 - **Verified facts (Bridex host, branch `studio`)**: `PluginContext` in `server/src/plugins/types.ts:108-230` (registerTool,
   registerCheck, registerStat, needsConfig, billing.outOfFunds, artifacts.annotate/mirror, jobs.track/settle/find/pending,
   usage.record, wakeAgent, paths.workspaceArtifacts/workspaceWorkdir, z, log); `plugin.yaml` `requires_env` names become

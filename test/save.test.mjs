@@ -64,7 +64,7 @@ test("finish: two outputs named by contentTypes, provenance, mirror, usage, sett
     costUsd: 0.3, units: 30, unit: "tk", taskId: "task-7",
   }]);
   assert.equal(s.jobs[0].status, "succeeded");
-  assert.deepEqual(s.jobs[0].result, { artifacts: rels, tokensCost: 30 });
+  assert.deepEqual(s.jobs[0].result, { workspace: "studio", artifacts: rels, tokensCost: 30 });
 
   assert.equal(reply.generation_id, "gen-42");
   assert.equal(reply.status, "completed");
@@ -96,13 +96,13 @@ test("saveOutputs: falls back to previewUrls, then the URL path for the extensio
   restore = f.restore;
   const s = setup();
   const rels = await s.saveOutputs(CALL, "kling", "g1", { originalUrls: [], previewUrls: [`${CDN}/p/clip.mp4`] }, "", {});
-  assert.deepEqual(rels, ["task-7/kling-g1.mp4"]);
+  assert.deepEqual(rels, { artifacts: ["task-7/kling-g1.mp4"], skipped: [] });
   assert.equal(f.calls[0].url, `${CDN}/p/clip.mp4`);
 });
 
 test("saveOutputs: no URLs at all → nothing saved, no mirror", async () => {
   const s = setup();
-  assert.deepEqual(await s.saveOutputs(CALL, "w", "g", { originalUrls: [], previewUrls: [] }, "", {}), []);
+  assert.deepEqual(await s.saveOutputs(CALL, "w", "g", { originalUrls: [], previewUrls: [] }, "", {}), { artifacts: [], skipped: [] });
   assert.deepEqual(s.rec.mirror, []);
 });
 
@@ -114,7 +114,7 @@ test("saveOutputs: a failed download is skipped with a warning", async () => {
   restore = f.restore;
   const s = setup();
   const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/gone`, `${CDN}/ok`] }, "", {});
-  assert.deepEqual(rels, ["task-7/w-g-2.png"]);
+  assert.deepEqual(rels, { artifacts: ["task-7/w-g-2.png"], skipped: [`${CDN}/gone`] });
   assert.ok(s.rec.logs.some((l) => l.level === "warn" && /download failed \(404\)/.test(l.msg)));
 });
 
@@ -127,7 +127,7 @@ test("saveOutputs: files over the cap stay on the CDN", async () => {
   restore = f.restore;
   const s = setup({ downloadCap: 5 });
   const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/big`, `${CDN}/declared`, `${CDN}/small`] }, "", {});
-  assert.deepEqual(rels, ["task-7/w-g-3.png"]);
+  assert.deepEqual(rels, { artifacts: ["task-7/w-g-3.png"], skipped: [`${CDN}/big`, `${CDN}/declared`] });
   assert.equal(s.rec.logs.filter((l) => /exceeds the/.test(l.msg)).length, 2);
 });
 
@@ -147,4 +147,36 @@ test("resolveLocal: artifacts/ and workdir paths resolve, escapes and missing fi
   assert.throws(() => s.resolveLocal("studio", path.join(s.dir, "outside.png")), /outside your workspace/);
   assert.throws(() => s.resolveLocal("studio", "artifacts/../../outside.png"), /outside your workspace/);
   assert.throws(() => s.resolveLocal("studio", "artifacts/refs/missing.png"), /file not found/);
+});
+
+test("resolveLocal: a symlink inside the workspace pointing outside is refused", () => {
+  const s = setup();
+  const work = s.ctx.paths.workspaceWorkdir("studio");
+  fs.mkdirSync(work, { recursive: true });
+  fs.writeFileSync(path.join(s.dir, "secret.png"), "x");
+  fs.symlinkSync(path.join(s.dir, "secret.png"), path.join(work, "ref.png"));
+  assert.throws(() => s.resolveLocal("studio", "ref.png"), /outside your workspace/);
+});
+
+test("resolveLocal: a workdir folder whose name merely ends in artifacts stays in the workdir", () => {
+  const s = setup();
+  const work = s.ctx.paths.workspaceWorkdir("studio");
+  fs.mkdirSync(path.join(work, "old_artifacts"), { recursive: true });
+  fs.writeFileSync(path.join(work, "old_artifacts", "ref.png"), "r");
+  assert.equal(s.resolveLocal("studio", "old_artifacts/ref.png"), path.join(work, "old_artifacts", "ref.png"));
+});
+
+test("finish: outputs that could not be downloaded come back as left_on_cdn, in the reply and the job", async () => {
+  const f = mockFetch([
+    ["GET", `${CDN}/gone`, () => new Response("nope", { status: 503 })],
+    ["GET", `${CDN}/ok`, () => file("OK", "image/png")],
+  ]);
+  restore = f.restore;
+  const s = setup();
+  const trackedId = s.ctx.jobs.track({ workspace: "studio", agent: "a", externalId: "9", model: "w", label: "" });
+  const reply = await s.finish(CALL, { generationId: 9, workflow: "w", tokensCost: 3, trackedId }, { result: { originalUrls: [`${CDN}/gone`, `${CDN}/ok`] } });
+  assert.deepEqual(reply.artifacts, ["task-7/w-9-2.png"]);
+  assert.deepEqual(reply.left_on_cdn, [`${CDN}/gone`]);
+  assert.match(reply.hint, /left_on_cdn/);
+  assert.deepEqual(s.jobs[0].result.left_on_cdn, [`${CDN}/gone`]);
 });

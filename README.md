@@ -6,6 +6,15 @@ one workflow's input fields and price (both free), runs it with inputs passed
 through unchanged and reference files taken from its workspace, and gets the
 outputs saved into its task's artifacts with provenance and token spend.
 
+## Requirements
+
+Node ≥ 20 (built-in `fetch`, `FormData`, `Blob`, `node:test`; no dependencies).
+Job tracking, the reboot-proof watcher and the agent wake-up need a Bridex core
+with `ctx.jobs` / `ctx.wakeAgent`; the out-of-funds card needs `ctx.billing` and
+the balance tile `ctx.registerStat`. On older cores the plugin still loads: a
+generation that outlives the wait is polled with `loremax_result`, and there is
+no card or tile.
+
 ## Install
 
 From the Bridex plugin catalog (Settings → Plugins → Catalog, or the operator
@@ -14,11 +23,12 @@ MCP `plugin_admin install loremax`), then set the credentials:
 - **Settings → Integrations → LoreMax key** (`LOREMAX_API_KEY`, format
   `lmx_prod_…`, created in LoreMax under API keys). Read per call — no restart
   needed.
-- **Settings → Integrations → LoreMax address** (`LOREMAX_BASE_URL`) — only when
-  LoreMax is not at `https://loremax.ai`. Empty means the default.
+- **Settings → Integrations → LoreMax address** (`LOREMAX_BASE_URL`) — usually
+  `https://loremax.ai`; the control plane sets it on studio instances.
 
-Without a key the tools still register; each call answers with the hint to set
-it, and the plugin card shows "needs config".
+Both are `requires_env`: the host does not start the plugin until both are set,
+and the plugin card shows `needs env: …` until then. Set `LOREMAX_BASE_URL` to
+`https://loremax.ai` even when LoreMax is at its default address.
 
 Optional `bridex.yaml`:
 
@@ -27,8 +37,8 @@ plugins:
   loremax:
     config:
       api_key: ${LOREMAX_API_KEY}     # default
-      base_url: ${LOREMAX_BASE_URL}   # default; empty = https://loremax.ai
-      default_wait_s: 180             # how long loremax_generate waits before handing back a generation_id
+      base_url: ${LOREMAX_BASE_URL}   # default
+      default_wait_s: 180             # how long loremax_generate waits before handing back a generation_id (10..1500; empty or invalid = 180)
       usd_per_token: 0.001            # optional: tokens → USD for the spend charts; absent = tokens only
 ```
 
@@ -37,8 +47,8 @@ plugins:
 | Tool | Cost | What |
 |---|---|---|
 | `loremax_workflows` | free | without `workflow_id`: the organization's workflows (id, visual id, title, category), optionally filtered by `query`. With `workflow_id`: its input fields (keys, types, options), usage hint and price in tokens |
-| `loremax_generate` | **paid** | run a workflow (`workflow_id` numeric or visual id) with `inputs` exactly as the fields name them and up to 20 `references` (`artifacts/…` or workspace files, ≤ 20 MB each, sent as files); wait (default 3 min), download the outputs into `artifacts/<task>/`, record the spend |
-| `loremax_result` | free | status / result of a `generation_id` that outlived the wait; saves outputs the same way, or returns the saved paths when the generation already finished |
+| `loremax_generate` | **paid** | run a workflow (`workflow_id` numeric or visual id) with `inputs` exactly as the fields name them and up to 20 `references` (`artifacts/…` or workspace files, ≤ 20 MB each, sent as files); wait `wait_s` (10–1500 s, default `default_wait_s` = 180), download the outputs into `artifacts/<task>/`, record the spend. `note` (≤ 200 chars) is a provenance note; it defaults to the first 120 chars of `inputs.prompt` |
+| `loremax_result` | free | status / result of a `generation_id` that outlived the wait, from this workspace only; optional `wait_s` (0–1500 s, default 0 = one check). Saves outputs the same way, returns the saved paths when the generation already finished, or `status: failed` with LoreMax's error |
 
 A 402 / "Insufficient tokens" from LoreMax raises one out-of-funds card in the
 inbox. A 429 is retried once after `Retry-After` (capped at 30 s); LoreMax
@@ -51,11 +61,15 @@ suffix when one generation returns several files) inside the task's artifact
 folder, or `artifacts/loremax/` outside a task. The slug is the `workflow_id`
 lower-cased with every non `[a-z0-9]` run turned into `-`, so workflow `12`
 gives `12-501.png` and `Flux Portrait v2` gives `flux-portrait-v2-501.png`.
-Originals are preferred over previews; files over 512 MB stay on LoreMax's CDN.
+Originals are preferred over previews. A file over 512 MB, or one whose
+download fails, stays on LoreMax's CDN: the reply lists its URL under
+`left_on_cdn`. A workflow that finishes right away returns its outputs in the
+execute reply; they are saved the same way, with no polling.
 Outputs are mirrored to the instance's cloud bucket when one is configured.
 
 Each file's sidecar carries a description (`LoreMax <workflow> · generation
-<id> · <note>`) and a `generation` block:
+<id> · <note>`, where `<note>` is the `note` argument or the start of
+`inputs.prompt`) and a `generation` block:
 
 | Field | Value |
 |---|---|
@@ -75,10 +89,15 @@ second. If the wait runs out, the agent gets a `generation_id` back and may end
 its turn. A watcher polls every pending generation every 15 s: when it
 completes, the outputs are saved and the agent is **woken** in the session it
 came from with the file list; when it fails, the agent is woken with the error.
-A server restart mid-wait loses neither the generation nor the tokens. A
-generation still pending after 6 h is given up.
+A server restart mid-wait loses neither the generation nor the tokens: the job
+label carries the token spend (`hero · 12 tk`), so the watcher records it when
+it finishes the generation. Status-check errors (network, rate limit) don't fail
+the job; the watcher keeps retrying. A generation still pending after 6 h is
+settled as failed and the agent is woken to say so.
 
-The plugin check reports whether the key works and the token balance; the
+The plugin check reports whether the key works and the token balance (it fails
+with "balance is empty — top up LoreMax" when the key works but no tokens
+remain); the
 dashboard shows a "LoreMax balance" tile, marked "running out" when it is empty
 or under 10 % of the limit.
 

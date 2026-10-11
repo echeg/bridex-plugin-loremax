@@ -88,12 +88,13 @@ test("JSON path: execute, poll until completed, save, annotate, usage, settle", 
   const j = s.jobs[0];
   assert.equal(j.externalId, "501");
   assert.equal(j.model, "flux-portrait");
-  assert.equal(j.label, "hero");
+  // the token spend rides in the label so a restart does not lose it
+  assert.equal(j.label, "hero · 12 tk");
   assert.equal(j.taskId, "task-9");
   assert.equal(j.sessionKey, "sess-1");
   assert.equal(j.runId, "run-1");
   assert.equal(j.status, "succeeded");
-  assert.deepEqual(j.result, { artifacts: ["task-9/flux-portrait-501.png"], tokensCost: 12 });
+  assert.deepEqual(j.result, { workspace: "studio", artifacts: ["task-9/flux-portrait-501.png"], tokensCost: 12 });
 });
 
 test("multipart path: references go as file_<i> blobs, params carry image_urls", async () => {
@@ -128,7 +129,7 @@ test("multipart path: references go as file_<i> blobs, params carry image_urls",
   const g = s.rec.annotate[0].meta.generation;
   assert.deepEqual(g.params, { prompt: "the knight at the castle", image_urls: refs });
   // no note → the prompt labels the job
-  assert.equal(s.jobs[0].label, "the knight at the castle");
+  assert.equal(s.jobs[0].label, "the knight at the castle · 12 tk");
 });
 
 test("a reference outside the workspace throws before any HTTP call", async () => {
@@ -217,4 +218,30 @@ test("402 on execute: outOfFunds recorded, nothing tracked", async () => {
   assert.equal(s.rec.outOfFunds[0].provider, "LoreMax");
   assert.equal(s.jobs.length, 0);
   assert.equal(f.calls.length, 1);
+});
+
+test("a workflow that finishes right away: outputs from the execute reply, no /check, no job", async () => {
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/now.png`] }, 202)],
+    ["GET", `${CDN}/now.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+  ]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.run({ workflow_id: "flux-portrait", inputs: { prompt: "p" } });
+  assert.equal(r.status, "completed");
+  assert.deepEqual(r.artifacts, ["task-9/flux-portrait-777.png"]);
+  assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
+  assert.equal(s.jobs.length, 0);
+  assert.equal(s.rec.usage[0].units, 5);
+});
+
+test("default_wait_s from config sets the wait; an emptied or bogus value falls back to 180", async () => {
+  for (const [value, waited] of [[30, 30], ["", 180], ["${LOREMAX_WAIT}", 180], [99_999, 1500]]) {
+    const s = await setup({ config: { default_wait_s: value } });
+    restore = mockFetch([["POST", "/api/v2/workflow/execute", () => EXECUTE], checkRoute(s, [{ status: "pending" }])]).restore;
+    const r = await s.run({ workflow_id: "w", inputs: {} });
+    restore();
+    assert.equal(r.status, "in_progress");
+    assert.match(r.hint, new RegExp(`after ${waited}s`), `default_wait_s=${JSON.stringify(value)}`);
+  }
 });

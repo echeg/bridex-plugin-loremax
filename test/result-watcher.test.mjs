@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import activate from "../index.mjs";
-import { fakeCtx, mockFetch, jsonResponse, mcpResult } from "./helpers.mjs";
+import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const CDN = "https://cdn.lm.test";
@@ -166,9 +166,27 @@ test("watcher: gives up after 6h without a request, and logs (never throws) tran
 });
 
 test("watcher: arms an interval that is cleared on shutdown", async () => {
-  const s = await setup();
-  assert.equal(s.rec.shutdown.length, 1);
-  s.rec.shutdown[0]();
+  const { setInterval: realSet, clearInterval: realClear } = globalThis;
+  const armed = [];
+  const cleared = [];
+  globalThis.setInterval = (...a) => {
+    const t = realSet(...a);
+    armed.push(t);
+    return t;
+  };
+  globalThis.clearInterval = (t) => {
+    cleared.push(t);
+    realClear(t);
+  };
+  try {
+    const s = await setup();
+    assert.equal(armed.length, 1);
+    assert.equal(s.rec.shutdown.length, 1);
+    s.rec.shutdown[0]();
+    assert.deepEqual(cleared, armed);
+  } finally {
+    Object.assign(globalThis, { setInterval: realSet, clearInterval: realClear });
+  }
 });
 
 test("check: no key, a working key with a balance, an empty balance, a refused key", async () => {
@@ -184,14 +202,14 @@ test("check: no key, a working key with a balance, an empty balance, a refused k
 
   const s = await setup();
   const check = s.rec.checks[0];
-  let reply = mcpResult({ success: true, data: { limit: 1000, used: 250, remaining: 750 } });
+  let reply = mcpResult({ limit: 1000, used: 250, remaining: 750 });
   const f = mockFetch([["POST", "/api/mcp", (req) => {
     assert.equal(req.json.params.name, "get_balance");
     return reply;
   }]]);
   restore = f.restore;
   assert.deepEqual(await check(), { ok: true, message: "key works · 750 tk left" });
-  reply = mcpResult({ success: true, data: { limit: 1000, used: 1000, remaining: 0 } });
+  reply = mcpResult({ limit: 1000, used: 1000, remaining: 0 });
   assert.deepEqual(await check(), { ok: false, message: "key works, but the balance is empty — top up LoreMax" });
   reply = new Response("Invalid API key", { status: 401 });
   assert.deepEqual(await check(), { ok: false, message: "LoreMax refused the key (401)" });
@@ -200,7 +218,7 @@ test("check: no key, a working key with a balance, an empty balance, a refused k
 test("stat tile: balance share, low flag, cached for 60 s, [] on error", async () => {
   const s = await setup();
   const stat = s.rec.stats[0];
-  let reply = () => mcpResult({ success: true, data: { limit: 1000, used: 250, remaining: 750 } });
+  let reply = () => mcpResult({ limit: 1000, used: 250, remaining: 750 });
   const f = mockFetch([["POST", "/api/mcp", () => reply()]]);
   restore = f.restore;
   assert.deepEqual(await stat(), [{ label: "LoreMax balance", value: "750 tk", sub: "balance", balance: 0.75, low: false }]);
@@ -209,7 +227,7 @@ test("stat tile: balance share, low flag, cached for 60 s, [] on error", async (
   assert.equal(f.calls.length, 1);
 
   s.clock.t += 31_000;
-  reply = () => mcpResult({ success: true, data: { limit: 1000, used: 950, remaining: 50 } });
+  reply = () => mcpResult({ limit: 1000, used: 950, remaining: 50 });
   const [tile] = await stat();
   assert.equal(f.calls.length, 2);
   assert.equal(tile.low, true);
@@ -218,4 +236,49 @@ test("stat tile: balance share, low flag, cached for 60 s, [] on error", async (
   s.clock.t += 61_000;
   reply = () => new Response("down", { status: 503 });
   assert.deepEqual(await stat(), []);
+});
+
+test("after a restart the token spend and note come back from the job label", async () => {
+  const s = await setup();
+  s.track({ label: "hero · 12 tk" });
+  const f = mockFetch([checkRoute(s, [DONE]), PNG]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.rec.usage[0].units, 12);
+  assert.match(s.rec.annotate[0].meta.description, /· hero$/);
+  assert.deepEqual(s.jobs[0].result.tokensCost, 12);
+});
+
+test("loremax_result: another workspace's generation and unknown ids are refused", async () => {
+  const s = await setup();
+  s.track({ workspace: "other" });
+  const f = mockFetch([]);
+  restore = f.restore;
+  await assert.rejects(s.run({ generation_id: "501" }), /not started from this workspace/);
+  await assert.rejects(s.run({ generation_id: "502" }), /not started from this workspace/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("loremax_result while the watcher is saving the same generation: in_progress, one download, one spend", async () => {
+  const s = await setup();
+  s.track();
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const f = mockFetch([
+    checkRoute(s, [DONE]),
+    ["GET", `${CDN}/out.png`, async () => {
+      await gate;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+  ]);
+  restore = f.restore;
+  const watching = s.watchOnce();
+  await new Promise((r) => setTimeout(r, 10));
+  const replying = s.run({ generation_id: "501" });
+  release();
+  const [reply] = await Promise.all([replying, watching]);
+  assert.equal(reply.status, "in_progress");
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/out.png")).length, 1);
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.jobs[0].status, "succeeded");
 });

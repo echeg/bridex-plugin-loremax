@@ -43,7 +43,7 @@ test("empty originalUrls and previewUrls: the reply says no files, the job settl
   assert.deepEqual(reply.artifacts, []);
   assert.match(reply.hint, /no files/);
   assert.equal(s.jobs[0].status, "succeeded");
-  assert.deepEqual(s.jobs[0].result, { artifacts: [], tokensCost: 7 });
+  assert.deepEqual(s.jobs[0].result, { workspace: "studio", artifacts: [], tokensCost: 7 });
   assert.equal(s.rec.mirror.length, 0);
   assert.equal(s.rec.annotate.length, 0);
   // the tokens were spent all the same
@@ -88,11 +88,11 @@ test("inputs without prompt: the job label and provenance note come from note; n
   ]);
   restore = f.restore;
   await s.run({ workflow_id: "upscale", inputs: { scale: 2 }, note: "hero upscale" });
-  assert.equal(s.jobs[0].label, "hero upscale");
+  assert.equal(s.jobs[0].label, "hero upscale · 7 tk");
   assert.match(s.rec.annotate[0].meta.description, /· hero upscale$/);
 
   await s.run({ workflow_id: "upscale", inputs: { scale: 2, prompt: 42 } });
-  assert.equal(s.jobs[1].label, "");
+  assert.equal(s.jobs[1].label, "7 tk");
 });
 
 test("plugin.yaml: every config_schema property has a default in createClient", () => {

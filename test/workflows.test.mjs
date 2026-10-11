@@ -1,7 +1,7 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import activate from "../index.mjs";
-import { fakeCtx, mockFetch, jsonResponse, mcpResult } from "./helpers.mjs";
+import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const tool = async () => {
@@ -62,21 +62,23 @@ test("details: merges fields with the price, no REST list call", async () => {
     mcpRoute({
       get_workflow_details: () =>
         mcpResult({
-          success: true,
-          data: {
-            workflow: { id: 11, visualId: "flux-portrait", title: "Flux portrait", category: "image", description: "d" },
-            input_fields: [{ key: "prompt", type: "textarea", label: "Prompt", config: {} }],
-            usage_hint: "describe the character",
-          },
+          id: 11,
+          visual_id: "flux-portrait",
+          title: "Flux portrait",
+          category: "image",
+          description: "d",
+          input_fields: [{ key: "prompt", type: "textarea", label: "Prompt", config: {} }],
+          usage_hint: "describe the character",
         }),
-      get_pricing: () => mcpResult({ success: true, data: { tokenCost: 40 } }),
+      get_pricing: () => mcpResult({ tokenCost: 40 }),
     }),
   ]);
   restore = f.restore;
   const { run } = await tool();
   const r = await run({ workflow_id: "flux-portrait" });
   assert.deepEqual(f.calls.map((c) => c.json.params.name), ["get_workflow_details", "get_pricing"]);
-  assert.deepEqual(f.calls[0].json.params.arguments, { workflowId: "flux-portrait" });
+  // LoreMax's get_workflow_details schema is { visual_id }; get_pricing's is { workflowId }
+  assert.deepEqual(f.calls[0].json.params.arguments, { visual_id: "flux-portrait" });
   assert.deepEqual(f.calls[1].json.params.arguments, { workflowId: "flux-portrait" });
   assert.deepEqual(r.workflow, { id: 11, visual_id: "flux-portrait", title: "Flux portrait", category: "image", description: "d" });
   assert.equal(r.input_fields[0].key, "prompt");
@@ -90,11 +92,8 @@ test("details: a failing get_pricing still returns the fields with price unavail
   const f = mockFetch([
     mcpRoute({
       get_workflow_details: () =>
-        mcpResult({
-          success: true,
-          data: { id: 12, visualId: "kling-i2v", title: "Kling", input_fields: [{ key: "duration", type: "select" }], pricing_variables_required: ["duration"] },
-        }),
-      get_pricing: () => mcpResult({ success: false, error: "pricing needs duration" }),
+        mcpResult({ id: 12, visual_id: "kling-i2v", title: "Kling", input_fields: [{ key: "duration", type: "select" }], pricing_variables_required: ["duration"] }),
+      get_pricing: () => mcpError("pricing needs duration"),
     }),
   ]);
   restore = f.restore;
@@ -110,7 +109,7 @@ test("details: a failing get_pricing still returns the fields with price unavail
 test("details: get_pricing HTTP failure is also non-fatal", async () => {
   const f = mockFetch([
     mcpRoute({
-      get_workflow_details: () => mcpResult({ success: true, data: { id: 11, input_fields: [] } }),
+      get_workflow_details: () => mcpResult({ id: 11, input_fields: [] }),
       get_pricing: () => jsonResponse({ error: "boom" }, 500),
     }),
   ]);
@@ -121,7 +120,7 @@ test("details: get_pricing HTTP failure is also non-fatal", async () => {
 });
 
 test("details: an unknown workflow surfaces LoreMax's error text", async () => {
-  const f = mockFetch([mcpRoute({ get_workflow_details: () => mcpResult({ success: false, error: "Workflow not found: nope" }) })]);
+  const f = mockFetch([mcpRoute({ get_workflow_details: () => mcpError("Workflow not found: nope") })]);
   restore = f.restore;
   const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
   await activate(ctx);
@@ -133,8 +132,8 @@ test("details: a huge field dump is capped at 14 000 chars", async () => {
   const fields = Array.from({ length: 400 }, (_, i) => ({ key: `field_${i}`, type: "text", label: "x".repeat(60), config: {} }));
   const f = mockFetch([
     mcpRoute({
-      get_workflow_details: () => mcpResult({ success: true, data: { id: 1, input_fields: fields } }),
-      get_pricing: () => mcpResult({ success: true, data: { tokenCost: 1 } }),
+      get_workflow_details: () => mcpResult({ id: 1, input_fields: fields }),
+      get_pricing: () => mcpResult({ tokenCost: 1 }),
     }),
   ]);
   restore = f.restore;

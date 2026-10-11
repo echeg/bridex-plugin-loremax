@@ -12,7 +12,7 @@ description: LoreMax workflows for agents — images and video. Outputs land in 
 entry: index.mjs
 requires_env:
   - LOREMAX_API_KEY    # managed credential: Settings → Integrations → LoreMax key (lmx_prod_…)
-  - LOREMAX_BASE_URL   # managed credential: LoreMax address, empty = https://loremax.ai
+  - LOREMAX_BASE_URL   # managed credential: LoreMax address — set it (https://loremax.ai) or the plugin won't start
 config_schema:
   type: object
   properties:

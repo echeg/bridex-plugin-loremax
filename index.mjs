@@ -13,7 +13,7 @@ import path from "node:path";
  *     loremax:
  *       config:
  *         api_key: ${LOREMAX_API_KEY}     # optional; this is the default
- *         base_url: ${LOREMAX_BASE_URL}   # optional; empty = https://loremax.ai
+ *         base_url: ${LOREMAX_BASE_URL}   # optional; this is the default (the credential must be set: requires_env)
  *         default_wait_s: 180             # how long loremax_generate waits before handing back a generation_id
  *         usd_per_token: 0.001            # optional; tokens → USD for the spend charts
  */
@@ -41,7 +41,7 @@ const EXT_BY_MIME = {
   "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg",
   "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
 };
-export const MIME_BY_EXT = Object.fromEntries(Object.entries(EXT_BY_MIME).map(([m, e]) => [e, m]));
+const MIME_BY_EXT = Object.fromEntries(Object.entries(EXT_BY_MIME).map(([m, e]) => [e, m]));
 MIME_BY_EXT.jpeg = "image/jpeg";
 
 const resolveRef = (ref) => String(ref ?? "").replace(/\$\{([A-Z0-9_]+)\}/g, (_, n) => process.env[n] ?? "");
@@ -88,6 +88,11 @@ export function createClient(ctx) {
     const v = Number(cfg.usd_per_token ?? 0);
     return Number.isFinite(v) && v > 0 ? v : 0;
   };
+  // the host leaves config validation to the plugin: an emptied or bogus value means the default, not "no wait"
+  const defaultWaitS = () => {
+    const v = Number(cfg.default_wait_s);
+    return Number.isFinite(v) && v > 0 ? Math.min(Math.max(v, 10), 1500) : 180;
+  };
 
   // an empty balance: one needs-a-person card in the inbox, not a silent failed run
   // (ctx.billing exists on newer Bridex cores; older ones just skip it)
@@ -123,7 +128,11 @@ export function createClient(ctx) {
   }
 
   let rpcId = 0;
-  /** One stateless tools/call (no initialize needed) → the tool's `data`. */
+  /**
+   * One stateless tools/call (no initialize needed) → the tool's data. LoreMax
+   * puts the data itself as JSON in the text content; a failed tool sets
+   * `isError` with `{"error": "…"}` there.
+   */
   async function mcpCall(tool, args = {}, timeoutMs = 60_000) {
     const res = await fetch(`${baseUrl()}/api/mcp`, {
       method: "POST",
@@ -141,35 +150,26 @@ export function createClient(ctx) {
       if (res.status === 402 || /insufficient tokens/i.test(body)) outOfFunds(body);
       throw httpError(`loremax ${res.status} /api/mcp ${tool}: ${body.slice(0, 400)}`, res.status, body);
     }
-    // an SSE-framed reply carries the JSON-RPC message on its last data: line
-    const raw = /^\s*(event|data):/m.test(body) && !body.trimStart().startsWith("{")
-      ? (body.split("\n").filter((l) => l.startsWith("data:")).at(-1) ?? "").slice(5)
-      : body;
     let msg;
     try {
-      msg = JSON.parse(raw);
+      msg = JSON.parse(body);
     } catch {
       throw httpError(`loremax returned non-JSON from /api/mcp ${tool}: ${body.slice(0, 200)}`, res.status, body);
     }
     if (msg.error) throw new Error(`loremax ${tool}: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
-    const result = msg.result ?? {};
-    let out = result.structuredContent && typeof result.structuredContent === "object" ? result.structuredContent : null;
-    if (!out) {
-      const t = (result.content ?? []).find((c) => c?.type === "text")?.text ?? "";
-      try {
-        out = JSON.parse(t);
-      } catch {
-        if (result.isError) throw new Error(`loremax ${tool}: ${t.slice(0, 400)}`);
-        return t;
-      }
+    const t = (msg.result?.content ?? []).find((c) => c?.type === "text")?.text ?? "";
+    let out;
+    try {
+      out = JSON.parse(t);
+    } catch {
+      throw new Error(`loremax ${tool}: ${(t || "empty tool result").slice(0, 400)}`);
     }
-    if (out?.success === false) {
-      const e = out.error;
-      const errText = typeof e === "string" ? e : (e?.message ?? JSON.stringify(e ?? "unknown error"));
+    if (msg.result?.isError) {
+      const errText = typeof out?.error === "string" ? out.error : JSON.stringify(out?.error ?? out ?? "unknown error");
       if (/insufficient tokens/i.test(errText)) outOfFunds(errText);
       throw new Error(`loremax ${tool}: ${errText}`.slice(0, 500));
     }
-    return out && typeof out === "object" && "data" in out ? out.data : out;
+    return out;
   }
 
   /** One /check of a generation; LoreMax answers a failed one with HTTP 500 and `status: "failed"` in the body. */
@@ -186,7 +186,27 @@ export function createClient(ctx) {
     }
   }
 
-  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, usdPerToken, restJson, mcpCall, check };
+  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, usdPerToken, defaultWaitS, restJson, mcpCall, check };
+}
+
+/** What the agent should do with a finished generation's outputs. */
+function outputsHint(artifacts, skipped = []) {
+  if (skipped.length)
+    return `${artifacts.length ? "some outputs were saved; " : ""}the left_on_cdn URLs could not be downloaded (failed or over the size cap) — they stay on LoreMax's CDN`;
+  return artifacts.length
+    ? "reference outputs as [media: artifacts/<path>]"
+    : "LoreMax reported the generation as completed but returned no files to save";
+}
+
+/**
+ * A job row keeps only model and label, so the token spend rides at the end of
+ * the label ("hero · 12 tk"): a generation finished after a restart still
+ * records what it cost.
+ */
+const jobLabel = (note, tokensCost) => `${note ? `${note} · ` : ""}${tokensCost} tk`;
+function fromJobLabel(label) {
+  const m = /^(?:([\s\S]*) · )?(\d+(?:\.\d+)?) tk$/.exec(label ?? "");
+  return m ? { note: m[1] ?? "", tokensCost: Number(m[2]) } : { note: label ?? "", tokensCost: 0 };
 }
 
 /** `flux-portrait`, `12`, `My Workflow!` → a file-name-safe slug. */
@@ -202,43 +222,56 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
   function resolveLocal(ws, p) {
     const art = ctx.paths.workspaceArtifacts(ws);
     const work = ctx.paths.workspaceWorkdir(ws);
-    const abs = p.includes("artifacts/")
-      ? path.join(art, p.slice(p.indexOf("artifacts/") + "artifacts/".length))
-      : path.resolve(work, p);
-    const inside = (root) => abs === root || abs.startsWith(root + path.sep);
-    if (!inside(art) && !inside(work)) throw new Error(`path is outside your workspace: ${p}`);
+    const m = /(?:^|\/)artifacts\/(.*)$/.exec(p);
+    const abs = m ? path.join(art, m[1]) : path.resolve(work, p);
+    const inside = (f, root) => f === root || f.startsWith(root + path.sep);
+    const jailed = (f, roots) => roots.some((r) => inside(f, r));
+    if (!jailed(abs, [art, work])) throw new Error(`path is outside your workspace: ${p}`);
     if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new Error(`file not found: ${p}`);
+    // a symlink inside the workspace must not hand out a file from elsewhere
+    const real = (f) => (fs.existsSync(f) ? fs.realpathSync(f) : f);
+    if (!jailed(real(abs), [real(art), real(work)])) throw new Error(`path is outside your workspace: ${p}`);
     return abs;
   }
 
-  /** Download outputs into artifacts/<task|loremax>/ with provenance; returns relative paths. */
+  /**
+   * Download outputs into artifacts/<task|loremax>/ with provenance. Returns the
+   * saved relative paths and the URLs left on the CDN (download failed or over
+   * the cap), so the agent still learns where those outputs are.
+   */
   async function saveOutputs(call, workflowSlug, generationId, result, note, generation) {
     const urls = result?.originalUrls?.length ? result.originalUrls : (result?.previewUrls ?? []);
-    if (!urls.length) return [];
+    const rels = [];
+    const skipped = [];
+    if (!urls.length) return { artifacts: rels, skipped };
     const folder = call.taskId ?? "loremax";
     const id = slugOf(generationId);
-    const rels = [];
+    const skip = (url, why) => {
+      ctx.log.warn(`loremax output ${why}: ${url}`);
+      skipped.push(url);
+    };
+    const overCap = `exceeds the ${Math.round(downloadCap / 1e6)}MB cap, left on the CDN`;
     for (const [i, url] of urls.entries()) {
       let res;
       try {
         res = await fetch(url, { signal: AbortSignal.timeout(300_000), redirect: "follow" });
       } catch (e) {
-        ctx.log.warn(`loremax output download failed (${e?.message ?? e}): ${url}`);
+        skip(url, `download failed (${e?.message ?? e})`);
         continue;
       }
       if (!res.ok) {
-        ctx.log.warn(`loremax output download failed (${res.status}): ${url}`);
+        skip(url, `download failed (${res.status})`);
         continue;
       }
       // a declared size over the cap is skipped before pulling the body
       if (Number(res.headers.get("content-length")) > downloadCap) {
-        ctx.log.warn(`loremax output exceeds the ${Math.round(downloadCap / 1e6)}MB cap, left on the CDN: ${url}`);
         await res.body?.cancel();
+        skip(url, overCap);
         continue;
       }
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.byteLength > downloadCap) {
-        ctx.log.warn(`loremax output exceeds the ${Math.round(downloadCap / 1e6)}MB cap, left on the CDN: ${url}`);
+        skip(url, overCap);
         continue;
       }
       const declared = String(result.contentTypes?.[i] ?? "").split(";")[0].trim().toLowerCase();
@@ -264,7 +297,7 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       rels.push(rel);
     }
     if (rels.length) ctx.artifacts.mirror(call.workspace, rels);
-    return rels;
+    return { artifacts: rels, skipped };
   }
 
   /**
@@ -284,7 +317,7 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       externalId: String(job.generationId),
       ...(costUsd ? { costUsd } : {}),
     };
-    const artifacts = await saveOutputs(call, slugOf(workflow), job.generationId, check?.result ?? {}, job.note ?? "", generation);
+    const { artifacts, skipped } = await saveOutputs(call, slugOf(workflow), job.generationId, check?.result ?? {}, job.note ?? "", generation);
     ctx.usage.record({
       workspace: call.workspace,
       agent: call.agent,
@@ -295,17 +328,18 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       unit: "tk",
       taskId: call.taskId,
     });
-    if (job.trackedId && ctx.jobs) ctx.jobs.settle(job.trackedId, { status: "succeeded", result: { artifacts, tokensCost } });
+    const leftOnCdn = skipped.length ? { left_on_cdn: skipped } : {};
+    if (job.trackedId && ctx.jobs)
+      ctx.jobs.settle(job.trackedId, { status: "succeeded", result: { workspace: call.workspace, artifacts, tokensCost, ...leftOnCdn } });
     return {
       generation_id: String(job.generationId),
       status: "completed",
       workflow,
       artifacts,
+      ...leftOnCdn,
       tokens_cost: tokensCost,
       ...(costUsd ? { cost_usd: costUsd } : {}),
-      hint: artifacts.length
-        ? "reference outputs as [media: artifacts/<path>]"
-        : "LoreMax reported the generation as completed but returned no files to save",
+      hint: outputsHint(artifacts, skipped),
     };
   }
 
@@ -321,6 +355,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
    * restart: the watcher then rebuilds from job.model and job.label only.
    */
   const generations = new Map();
+  /**
+   * Generation ids a tool call or the watcher is polling right now: the others
+   * leave them alone so one generation is never downloaded and settled twice.
+   */
+  const inFlight = new Set();
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
@@ -353,18 +392,18 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
             : q ? `no workflow matches "${args.query}" — call without query for the full list` : "this organization has no workflows",
         }, null, 1)));
       }
-      const d = await lmx.mcpCall("get_workflow_details", { workflowId: id });
-      const w = d?.workflow ?? d ?? {};
+      // get_workflow_details takes visual_id but also finds a workflow by its numeric id
+      const d = (await lmx.mcpCall("get_workflow_details", { visual_id: id })) ?? {};
       const out = {
-        workflow: { id: w.id ?? id, visual_id: w.visualId ?? w.visual_id, title: w.title, category: w.category, description: w.description },
-        input_fields: d?.input_fields ?? [],
-        usage_hint: d?.usage_hint,
-        ...(d?.pricing_variables_required ? { pricing_variables_required: d.pricing_variables_required } : {}),
+        workflow: { id: d.id ?? id, visual_id: d.visual_id, title: d.title, category: d.category, description: d.description },
+        input_fields: d.input_fields ?? [],
+        usage_hint: d.usage_hint,
+        ...(d.pricing_variables_required ? { pricing_variables_required: d.pricing_variables_required } : {}),
       };
       // the price is a courtesy: a pricing hiccup must not hide the fields the agent needs
       try {
         const p = await lmx.mcpCall("get_pricing", { workflowId: id });
-        out.token_cost = p?.tokenCost ?? p?.token_cost;
+        out.token_cost = p?.tokenCost;
       } catch (e) {
         out.price = `unavailable: ${short(e?.message ?? e)}`;
       }
@@ -422,6 +461,13 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       const generationId = String(sub.generationId);
       const tokensCost = Number(sub.tokensCost) || 0;
       ctx.log.info(`@${call.agent} loremax ${workflow} → generation ${generationId} (${tokensCost} tk)`);
+      const job = { generationId, workflow, inputs, references, tokensCost, note };
+      // a workflow that finished right away carries its outputs in the execute reply
+      // and has no async job: /check would answer 400, so there is nothing to poll
+      if (sub.async !== true && (sub.status === "completed" || sub.originalUrls?.length || sub.previewUrls?.length)) {
+        const result = { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], contentTypes: [] };
+        return text(JSON.stringify(await outputs.finish(call, { ...job, trackedId: null }, { result }), null, 1));
+      }
       // tracked from the first second: a restart mid-wait loses neither the
       // generation nor the tokens — the watcher finishes it and wakes the agent
       const trackedId = ctx.jobs
@@ -433,13 +479,13 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
           runId: call.runId ?? null,
           externalId: generationId,
           model: workflow,
-          label: note,
+          label: jobLabel(note, tokensCost),
         })
         : null;
-      const job = { generationId, workflow, inputs, references, tokensCost, trackedId, note };
+      job.trackedId = trackedId;
       generations.set(generationId, job);
 
-      return text(JSON.stringify(await waitFor(call, job, Number(args.wait_s ?? lmx.cfg.default_wait_s) * 1000), null, 1));
+      return text(JSON.stringify(await waitFor(call, job, (args.wait_s ?? lmx.defaultWaitS()) * 1000), null, 1));
     },
   });
 
@@ -454,37 +500,42 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
     handler: async (args, call) => {
       const generationId = String(args.generation_id ?? "").trim();
       if (!generationId) throw new Error("generation_id is required — loremax_generate hands it back");
+      // job rows are per plugin, not per workspace, and LoreMax ids are sequential:
+      // only this workspace's generations are reachable from here
+      const notYours = `generation ${generationId} was not started from this workspace — use the generation_id loremax_generate handed back`;
       const found = ctx.jobs?.find?.(generationId) ?? null;
+      if (ctx.jobs && !found && !generations.has(generationId)) throw new Error(notYours);
       // settled already (by the tool or the watcher): the files are on disk, no new download
       if (found?.status === "succeeded") {
         const r = found.result ?? {};
+        if (r.workspace && r.workspace !== call.workspace) throw new Error(notYours);
         const artifacts = r.artifacts ?? [];
         return text(JSON.stringify({
           generation_id: generationId,
           status: "completed",
           artifacts,
+          ...(r.left_on_cdn ? { left_on_cdn: r.left_on_cdn } : {}),
           tokens_cost: Number(r.tokensCost) || 0,
-          hint: artifacts.length ? "reference outputs as [media: artifacts/<path>]" : "the generation completed but returned no files to save",
+          hint: outputsHint(artifacts, r.left_on_cdn),
         }, null, 1));
       }
       if (found?.status === "failed") return text(JSON.stringify({ generation_id: generationId, status: "failed", error: found.error }, null, 1));
       const row = ctx.jobs?.pending().find((j) => j.externalId === generationId);
-      // after a restart only the job row is left: its workflow, label and task
+      if (row && row.workspace !== call.workspace) throw new Error(notYours);
+      // the generate call or the watcher is fetching it right now: one download, one settle
+      if (inFlight.has(generationId))
+        return text(JSON.stringify({ generation_id: generationId, status: "in_progress", hint: "being checked and saved right now — call loremax_result again in a moment" }, null, 1));
+      // after a restart only the job row is left: its workflow, label (note + tokens) and task
       const job = generations.get(generationId) ?? {
         generationId,
         workflow: row?.model ?? "",
-        note: row?.label ?? "",
+        ...fromJobLabel(row?.label),
         trackedId: found?.id ?? null,
       };
       return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, Number(args.wait_s ?? 0) * 1000), null, 1));
     },
   });
 
-  /**
-   * Generation ids a tool call is polling right now: the watcher leaves them
-   * alone so one generation is never downloaded and settled twice.
-   */
-  const inFlight = new Set();
 
   /** Poll /check until completed (→ finish), failed (→ settle + throw) or waitMs runs out (→ in_progress reply). */
   async function waitFor(call, job, waitMs) {
@@ -501,8 +552,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
           throw new Error(`LoreMax generation ${generationId} status check failed: ${e?.message ?? e} — it may still finish; poll loremax_result with this generation_id`);
         }
         if (c?.status === "completed") {
+          const done = await outputs.finish(call, job, c);
           generations.delete(generationId);
-          return await outputs.finish(call, job, c);
+          return done;
         }
         if (c?.status === "failed") {
           generations.delete(generationId);
@@ -537,6 +589,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
     try {
       for (const j of ctx.jobs.pending()) {
         if (inFlight.has(j.externalId)) continue;
+        inFlight.add(j.externalId);
         const wake = (prompt) =>
           ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-job:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}), prompt });
         const what = `LoreMax generation ${j.externalId} (${j.model || "workflow"}${j.label ? ` — ${j.label}` : ""})`;
@@ -550,10 +603,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
           }
           const c = await lmx.check(j.externalId);
           if (c?.status === "completed") {
-            const job = { ...(generations.get(j.externalId) ?? { generationId: j.externalId, workflow: j.model, note: j.label }), trackedId: j.id };
-            generations.delete(j.externalId);
+            const job = { ...(generations.get(j.externalId) ?? { generationId: j.externalId, workflow: j.model, ...fromJobLabel(j.label) }), trackedId: j.id };
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
             const done = await outputs.finish(call, job, c);
+            generations.delete(j.externalId);
             const list = done.artifacts.map((a) => `artifacts/${a}`).join(", ") || "(LoreMax returned no files)";
             wake(`${what} finished: ${list} — check them, then continue where you left off${task}.`);
           } else if (c?.status === "failed") {
@@ -565,6 +618,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         } catch (e) {
           // transient (network, rate limit, key): keep polling; the 6h give-up ends a dead one
           ctx.log.warn(`loremax job ${j.externalId}: ${e?.message ?? e}`);
+        } finally {
+          inFlight.delete(j.externalId);
         }
       }
     } finally {

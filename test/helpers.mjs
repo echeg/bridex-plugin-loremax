@@ -6,9 +6,14 @@ import path from "node:path";
 const chain = () => new Proxy(function () {}, { get: () => () => chain(), apply: () => chain() });
 export const z = new Proxy({}, { get: () => () => chain() });
 
+// each test file runs in its own process: its temp workspaces go when it exits
+const tempDirs = [];
+process.once("exit", () => tempDirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+
 /** A PluginContext double that records everything the plugin hands to the host. */
 export function fakeCtx({ config = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loremax-test-"));
+  tempDirs.push(dir);
   const rec = {
     tools: new Map(),
     checks: [],
@@ -94,9 +99,13 @@ export function mockFetch(routes) {
 export const jsonResponse = (v, status = 200, headers = {}) =>
   new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...headers } });
 
-/** A JSON-RPC tools/call reply the way LoreMax's MCP endpoint shapes it. */
-export const mcpResult = (payload, id = 1) =>
-  jsonResponse({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(payload) }] } });
+/** A JSON-RPC tools/call reply the way LoreMax's MCP endpoint shapes it: the tool's data as JSON text. */
+export const mcpResult = (data, id = 1) =>
+  jsonResponse({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(data) }] } });
+
+/** A failed LoreMax tool: still HTTP 200, `isError` set and `{"error": "…"}` as the text. */
+export const mcpError = (error, id = 1) =>
+  jsonResponse({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify({ error }) }], isError: true } });
 
 /** Set env vars for one test; returns a restore function. */
 export function withEnv(vars) {

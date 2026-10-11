@@ -13,5 +13,5 @@ First release.
 - Reboot-proof watcher: pending generations are finished after a restart and the agent is woken in its session;
   a generation pending for over 6 h is given up.
 - Health check (key and balance), a dashboard balance tile, an out-of-funds inbox card on 402.
-- Config: `api_key` / `base_url` from the managed `LOREMAX_API_KEY` / `LOREMAX_BASE_URL` credentials,
-  `default_wait_s` (180), optional `usd_per_token`.
+- Config: `api_key` / `base_url` from the managed `LOREMAX_API_KEY` / `LOREMAX_BASE_URL` credentials (both
+  required), `default_wait_s` (180), optional `usd_per_token`.
