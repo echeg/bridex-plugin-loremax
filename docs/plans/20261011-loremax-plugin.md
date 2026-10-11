@@ -241,11 +241,14 @@
       `{ watchOnce }` as a test seam (the host ignores the return value)
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented (three tools, check, tile, watcher, provenance with `image_urls`)
-- [ ] verify edge cases: empty `originalUrls` and `previewUrls` → reply says no files and settles succeeded with
+- [x] verify all requirements from Overview are implemented (three tools, check, tile, watcher, provenance with `image_urls`)
+- [x] verify edge cases: empty `originalUrls` and `previewUrls` → reply says no files and settles succeeded with
       `artifacts: []`; `workflow_id` numeric vs visual id both accepted; `inputs` without `prompt` gets a label from `note`
-- [ ] run `node --check index.mjs` and the full `npm test`
-- [ ] verify `plugin.yaml` parses as YAML and every `config_schema.properties` key has a default or is optional in `index.mjs`
+- [x] run `node --check index.mjs` and the full `npm test`
+- [x] verify `plugin.yaml` parses as YAML and every `config_schema.properties` key has a default or is optional in `index.mjs`
+- ➕ note: the checks live in `test/acceptance.test.mjs` (wiring of the three tools, check, tile and watcher; empty
+      outputs through `loremax_generate` and the watcher; numeric and visual ids; label from `note`; the manifest's
+      `config_schema` keys all have a default in `createClient`); `plugin.yaml` was also parsed with Ruby's YAML
 
 ### Task 7: [Final] Documentation
 - [ ] write `README.md` like fal's: what it is, install from the catalog, Settings → Integrations → `LOREMAX_API_KEY` /
