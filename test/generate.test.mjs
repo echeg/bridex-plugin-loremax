@@ -235,6 +235,37 @@ test("a workflow that finishes right away: outputs from the execute reply, no /c
   assert.equal(s.rec.usage[0].units, 5);
 });
 
+test("a synchronous run ('success', only externalUrls): saved from the reply, never polled", async () => {
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 778, status: "success", tokensCost: 4, externalUrls: [`${CDN}/ext.png`] }, 202)],
+    ["GET", `${CDN}/ext.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+  ]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.run({ workflow_id: "flux-portrait", inputs: { prompt: "p" } });
+  assert.equal(r.status, "completed");
+  assert.deepEqual(r.artifacts, ["task-9/flux-portrait-778.png"]);
+  assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
+  assert.equal(s.jobs.length, 0);
+});
+
+test("execute with no reply (timeout / reset): says the generation may have been charged", async () => {
+  const f = mockFetch([["POST", "/api/v2/workflow/execute", () => { throw new TypeError("fetch failed"); }]]);
+  restore = f.restore;
+  const s = await setup();
+  await assert.rejects(s.run({ workflow_id: "w", inputs: {} }), /no reply \(fetch failed\).*may have accepted and charged/);
+  assert.equal(s.jobs.length, 0);
+});
+
+test("the job row keeps inputs, references, cost and note as track() params", async () => {
+  const s = await setup();
+  s.put("refs/a.png", "A");
+  const f = mockFetch([["POST", "/api/v2/workflow/execute", () => EXECUTE], checkRoute(s, [{ status: "pending" }])]);
+  restore = f.restore;
+  await s.run({ workflow_id: "w", inputs: { prompt: "p" }, references: ["artifacts/refs/a.png"], wait_s: 10, note: "hero" });
+  assert.deepEqual(s.jobs[0].params, { inputs: { prompt: "p" }, references: ["artifacts/refs/a.png"], tokensCost: 12, note: "hero" });
+});
+
 test("default_wait_s from config sets the wait; an emptied or bogus value falls back to 180", async () => {
   for (const [value, waited] of [[30, 30], ["", 180], ["${LOREMAX_WAIT}", 180], [99_999, 1500]]) {
     const s = await setup({ config: { default_wait_s: value } });

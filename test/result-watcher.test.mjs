@@ -98,7 +98,7 @@ test("loremax_result: after a timed-out loremax_generate it reuses the in-memory
   fs.writeFileSync(ref, "REF");
   let done = false;
   const f = mockFetch([
-    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 501, tokensCost: 7 })],
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 501, tokensCost: 7, async: true })],
     checkRoute(s, [() => (done ? DONE : { status: "pending" })]),
     PNG,
   ]);
@@ -130,6 +130,18 @@ test("watcher: finishes a pending job, settles it and wakes the agent with the a
   assert.equal(w.key, `loremax-job:${s.jobs[0].id}`);
   assert.match(w.prompt, /LoreMax generation 501 \(flux-portrait — hero\) finished: artifacts\/task-9\/flux-portrait-501\.png/);
   assert.equal(s.rec.usage[0].model, "flux-portrait");
+});
+
+test("watcher after a restart: provenance and cost come from the job row's track() params", async () => {
+  const s = await setup();
+  s.track({ label: "x", params: { inputs: { prompt: "rain" }, references: ["artifacts/r.png"], tokensCost: 9, note: "hero" } });
+  const f = mockFetch([checkRoute(s, [DONE]), PNG]);
+  restore = f.restore;
+  await s.watchOnce();
+  const g = s.rec.annotate[0].meta.generation;
+  assert.deepEqual(g.params, { prompt: "rain", image_urls: ["artifacts/r.png"] });
+  assert.match(s.rec.annotate[0].meta.description, /· hero$/);
+  assert.equal(s.rec.usage[0].units, 9);
 });
 
 test("watcher: a still-running job is left alone, a failed one is settled and the agent woken", async () => {

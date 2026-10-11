@@ -54,7 +54,8 @@ export function fakeCtx({ config = {} } = {}) {
     jobs: {
       track: (input) => {
         const id = `job-${++seq}`;
-        jobs.push({ ...input, id, status: "running", result: null, error: null, createdAt: new Date().toISOString(), label: input.label ?? "", model: input.model ?? "" });
+        // like the host: track() params are kept as result.params until the job settles
+        jobs.push({ ...input, id, status: "running", result: input.params ? { params: input.params } : null, error: null, createdAt: new Date().toISOString(), label: input.label ?? "", model: input.model ?? "" });
         return id;
       },
       settle: (id, outcome) => {

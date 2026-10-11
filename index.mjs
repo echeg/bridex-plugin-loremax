@@ -199,9 +199,9 @@ function outputsHint(artifacts, skipped = []) {
 }
 
 /**
- * A job row keeps only model and label, so the token spend rides at the end of
- * the label ("hero · 12 tk"): a generation finished after a restart still
- * records what it cost.
+ * Older cores keep only model and label on a job row (newer ones also keep the
+ * track() params), so the token spend rides at the end of the label
+ * ("hero · 12 tk"): a generation finished after a restart still records what it cost.
  */
 const jobLabel = (note, tokensCost) => `${note ? `${note} · ` : ""}${tokensCost} tk`;
 function fromJobLabel(label) {
@@ -240,7 +240,8 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
    * the cap), so the agent still learns where those outputs are.
    */
   async function saveOutputs(call, workflowSlug, generationId, result, note, generation) {
-    const urls = result?.originalUrls?.length ? result.originalUrls : (result?.previewUrls ?? []);
+    // a workflow can return its media only as externalUrls (outputs.external): LoreMax counts that as a success too
+    const urls = [result?.originalUrls, result?.previewUrls, result?.externalUrls].find((u) => u?.length) ?? [];
     const rels = [];
     const skipped = [];
     if (!urls.length) return { artifacts: rels, skipped };
@@ -366,9 +367,21 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
   const outputs = createOutputs(ctx, lmx);
   /**
    * What finish needs beyond the job row, by LoreMax generation id. Lost on a
-   * restart: the watcher then rebuilds from job.model and job.label only.
+   * restart: then rebuilt from the row's track() params, or on older cores from
+   * job.model and job.label only.
    */
   const generations = new Map();
+  /** The job a generation id stands for after a restart: from the row's params, else its label. */
+  const fromRow = (generationId, row, found) => {
+    const p = found?.result?.params;
+    return {
+      generationId,
+      workflow: row?.model ?? "",
+      ...(p && typeof p === "object"
+        ? { inputs: p.inputs ?? {}, references: p.references ?? [], tokensCost: Number(p.tokensCost) || 0, note: p.note ?? "" }
+        : fromJobLabel(row?.label)),
+    };
+  };
   /**
    * Generation ids a tool call or the watcher is polling right now: the others
    * leave them alone so one generation is never downloaded and settled twice.
@@ -470,16 +483,25 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       } else {
         init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflowId: workflow, inputs }) };
       }
-      const sub = await lmx.restJson("/api/v2/workflow/execute", init, 120_000);
+      let sub;
+      try {
+        // a synchronous workflow renders inside this request (and uploads go first): give it room
+        sub = await lmx.restJson("/api/v2/workflow/execute", init, 600_000);
+      } catch (e) {
+        // only a timeout or dropped connection (fetch's TypeError) leaves the outcome unknown:
+        // LoreMax may already have taken the tokens and be rendering
+        if (e?.status != null || !(e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError)) throw e;
+        throw new Error(`loremax execute got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`);
+      }
       if (sub?.generationId == null) throw new Error(`loremax execute returned no generationId: ${JSON.stringify(sub).slice(0, 300)}`);
       const generationId = String(sub.generationId);
       const tokensCost = Number(sub.tokensCost) || 0;
       ctx.log.info(`@${call.agent} loremax ${workflow} → generation ${generationId} (${tokensCost} tk)`);
       const job = { generationId, workflow, inputs, references, tokensCost, note };
-      // a workflow that finished right away carries its outputs in the execute reply
-      // and has no async job: /check would answer 400, so there is nothing to poll
-      if (sub.async !== true && (sub.status === "completed" || sub.originalUrls?.length || sub.previewUrls?.length)) {
-        const result = { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], contentTypes: [] };
+      // only an async reply has a job to poll: any other one ran synchronously and is finished
+      // (a failed run is a 500), its outputs are in the reply and /check would answer 400
+      if (sub.async !== true) {
+        const result = { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], externalUrls: sub.externalUrls ?? [], contentTypes: [] };
         return text(JSON.stringify(await outputs.finish(call, { ...job, trackedId: null }, { result }), null, 1));
       }
       // tracked from the first second: a restart mid-wait loses neither the
@@ -494,6 +516,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
           externalId: generationId,
           model: workflow,
           label: jobLabel(note, tokensCost),
+          // kept with the job row on newer cores (older ones ignore it): a restart keeps the provenance
+          params: { inputs, references, tokensCost, note },
         })
         : null;
       job.trackedId = trackedId;
@@ -539,13 +563,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       // the generate call or the watcher is fetching it right now: one download, one settle
       if (inFlight.has(generationId))
         return text(JSON.stringify({ generation_id: generationId, status: "in_progress", hint: "being checked and saved right now — call loremax_result again in a moment" }, null, 1));
-      // after a restart only the job row is left: its workflow, label (note + tokens) and task
-      const job = generations.get(generationId) ?? {
-        generationId,
-        workflow: row?.model ?? "",
-        ...fromJobLabel(row?.label),
-        trackedId: found?.id ?? null,
-      };
+      // after a restart only the job row is left: its workflow, params (or label) and task
+      const job = generations.get(generationId) ?? { ...fromRow(generationId, row, found), trackedId: found?.id ?? null };
       return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, Number(args.wait_s ?? 0) * 1000), null, 1));
     },
   });
@@ -621,7 +640,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
           }
           const c = await lmx.check(j.externalId);
           if (c?.status === "completed") {
-            const job = { ...(generations.get(j.externalId) ?? { generationId: j.externalId, workflow: j.model, ...fromJobLabel(j.label) }), trackedId: j.id };
+            const job = { ...(generations.get(j.externalId) ?? fromRow(j.externalId, j, cur)), trackedId: j.id };
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
             const done = await outputs.finish(call, job, c);
             generations.delete(j.externalId);

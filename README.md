@@ -61,10 +61,13 @@ suffix when one generation returns several files) inside the task's artifact
 folder, or `artifacts/loremax/` outside a task. The slug is the `workflow_id`
 lower-cased with every non `[a-z0-9]` run turned into `-`, so workflow `12`
 gives `12-501.png` and `Flux Portrait v2` gives `flux-portrait-v2-501.png`.
-Originals are preferred over previews. A file over 512 MB, or one whose
+Originals are preferred over previews, previews over external URLs. A file over 512 MB, or one whose
 download fails, stays on LoreMax's CDN: the reply lists its URL under
-`left_on_cdn`. A workflow that finishes right away returns its outputs in the
-execute reply; they are saved the same way, with no polling.
+`left_on_cdn`. A synchronous workflow (any execute reply that isn't `async`)
+returns its outputs in the execute reply; they are saved the same way, with no
+polling. If the execute call gets no reply at all (timeout or dropped
+connection), the error says the generation may already have been charged, so
+the agent checks LoreMax before running it again.
 Outputs are mirrored to the instance's cloud bucket when one is configured.
 
 Each file's sidecar carries a description (`LoreMax <workflow> · generation
@@ -90,8 +93,10 @@ its turn. A watcher polls every pending generation every 15 s: when it
 completes, the outputs are saved and the agent is **woken** in the session it
 came from with the file list; when it fails, the agent is woken with the error.
 A server restart mid-wait loses neither the generation nor the tokens: the job
-label carries the token spend (`hero · 12 tk`), so the watcher records it when
-it finishes the generation. Status-check errors (network, rate limit) don't fail
+row keeps the inputs, references, token spend and note (as `track()` params), so
+the watcher saves the outputs with full provenance. Older cores keep only the
+label, which carries the token spend (`hero · 12 tk`), so the spend is still
+recorded. Status-check errors (network, rate limit) don't fail
 the job; the watcher keeps retrying. A generation still pending after 6 h is
 settled as failed and the agent is woken to say so.
 
