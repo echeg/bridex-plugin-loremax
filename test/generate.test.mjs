@@ -257,6 +257,18 @@ test("execute with no reply (timeout / reset): says the generation may have been
   assert.equal(s.jobs.length, 0);
 });
 
+test("execute cut off by a gateway 5xx (non-JSON body): says the generation may have been charged", async () => {
+  restore = mockFetch([["POST", "/api/v2/workflow/execute", () => new Response("<html>524 timeout</html>", { status: 524 })]]).restore;
+  const s = await setup();
+  await assert.rejects(s.run({ workflow_id: "w", inputs: {} }), /no reply \(loremax 524 .*may have accepted and charged/);
+});
+
+test("execute failed by LoreMax itself (JSON 500): a plain error, no charged warning", async () => {
+  restore = mockFetch([["POST", "/api/v2/workflow/execute", () => jsonResponse({ error: "workflow crashed", status: "failed" }, 500)]]).restore;
+  const s = await setup();
+  await assert.rejects(s.run({ workflow_id: "w", inputs: {} }), (e) => /loremax 500 .*workflow crashed/.test(e.message) && !/charged/.test(e.message));
+});
+
 test("the job row keeps inputs, references, cost and note as track() params", async () => {
   const s = await setup();
   s.put("refs/a.png", "A");

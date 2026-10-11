@@ -522,9 +522,17 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         // a synchronous workflow renders inside this request (and uploads go first): give it room
         sub = await lmx.restJson("/api/v2/workflow/execute", init, 600_000);
       } catch (e) {
-        // only a timeout or dropped connection (fetch's TypeError) leaves the outcome unknown:
-        // LoreMax may already have taken the tokens and be rendering
-        if (e?.status != null || !(e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError)) throw e;
+        // a timeout, a dropped connection (fetch's TypeError) or a gateway 5xx without
+        // LoreMax's own JSON body (an edge 502/524 cutting a long sync render) leaves the
+        // outcome unknown: LoreMax may already have taken the tokens and be rendering
+        let body;
+        try {
+          body = JSON.parse(e?.body ?? "");
+        } catch {}
+        const unknown = e?.status != null
+          ? e.status >= 500 && (body == null || typeof body !== "object")
+          : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
+        if (!unknown) throw e;
         throw new Error(`loremax execute got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`);
       }
       if (sub?.generationId == null) throw new Error(`loremax execute returned no generationId: ${JSON.stringify(sub).slice(0, 300)}`);
