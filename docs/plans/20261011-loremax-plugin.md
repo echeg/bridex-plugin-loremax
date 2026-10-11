@@ -251,11 +251,11 @@
       `config_schema` keys all have a default in `createClient`); `plugin.yaml` was also parsed with Ruby's YAML
 
 ### Task 7: [Final] Documentation
-- [ ] write `README.md` like fal's: what it is, install from the catalog, Settings → Integrations → `LOREMAX_API_KEY` /
+- [x] write `README.md` like fal's: what it is, install from the catalog, Settings → Integrations → `LOREMAX_API_KEY` /
       `LOREMAX_BASE_URL`, optional `bridex.yaml` config block, tools table (free/paid), output naming and the sidecar's
       `generation` fields, the reboot-proof wait, a short "for the studio" note (default workflows are named in
       `studio/art-guide.md`; references come from `artifacts/studio-references/`)
-- [ ] add a `CHANGELOG.md` entry for 0.1.0
+- [x] add a `CHANGELOG.md` entry for 0.1.0
 
 ## Technical Details
 - **Request/response shapes** are the verified ones in Decisions; `workflowId` is sent as given (LoreMax accepts numeric ids
