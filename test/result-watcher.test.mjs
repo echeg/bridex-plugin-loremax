@@ -325,3 +325,32 @@ test("watcher: a job a tool call finished while the pass was busy elsewhere is n
   assert.equal(s.rec.wakes.length, 1);
   assert.match(s.rec.wakes[0].prompt, /501/);
 });
+
+test("loremax_result: a failed job of another workspace is refused (the host's find() has no workspace)", async () => {
+  const s = await setup();
+  // like the real host: find() returns only id, status, result and error
+  const find = s.ctx.jobs.find;
+  s.ctx.jobs.find = (id) => {
+    const j = find(id);
+    return j && { id: j.id, status: j.status, result: j.result, error: j.error };
+  };
+  s.track({ workspace: "other" });
+  const f = mockFetch([checkRoute(s, [{ status: "failed", error: "NSFW filter" }])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "failed");
+  await assert.rejects(s.run({ generation_id: "501" }), /not started from this workspace/);
+  const own = await s.run({ generation_id: "501" }, { ...CALL, workspace: "other" });
+  assert.equal(own.status, "failed");
+});
+
+test("watcher: outputs that could not be downloaded are named in the wake prompt", async () => {
+  const s = await setup();
+  s.track();
+  const f = mockFetch([checkRoute(s, [DONE]), ["GET", `${CDN}/out.png`, () => new Response("nope", { status: 503 })]]);
+  restore = f.restore;
+  await s.watchOnce();
+  const { prompt } = s.rec.wakes[0];
+  assert.match(prompt, new RegExp(`still on LoreMax's CDN: ${CDN}/out\\.png`));
+  assert.doesNotMatch(prompt, /returned no files/);
+});

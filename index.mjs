@@ -199,6 +199,22 @@ function outputsHint(artifacts, skipped = []) {
 }
 
 /**
+ * The body, read chunk by chunk so an undeclared size never buffers more than
+ * the cap: null (and the download cancelled) once it goes over.
+ */
+async function readCapped(res, cap) {
+  const chunks = [];
+  let size = 0;
+  // leaving the loop early cancels the stream
+  for await (const chunk of res.body ?? []) {
+    size += chunk.byteLength;
+    if (size > cap) return null;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, size);
+}
+
+/**
  * Older cores keep only model and label on a job row (newer ones also keep the
  * track() params), so the token spend rides at the end of the label
  * ("hero · 12 tk"): a generation finished after a restart still records what it cost.
@@ -269,12 +285,12 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
           continue;
         }
         // the body read can time out or reset too: that output stays on the CDN, the rest still finishes
-        buf = Buffer.from(await res.arrayBuffer());
+        buf = await readCapped(res, downloadCap);
       } catch (e) {
         skip(url, `download failed (${e?.message ?? e})`);
         continue;
       }
-      if (buf.byteLength > downloadCap) {
+      if (!buf) {
         skip(url, overCap);
         continue;
       }
@@ -288,27 +304,42 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       const name = `${workflowSlug}-${id}${urls.length > 1 ? `-${i + 1}` : ""}.${ext}`;
       const rel = path.posix.join(folder, name);
       const abs = path.join(artRoot, rel);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      // the name is predictable: a symlinked folder or file planted there must not
-      // redirect the write outside the workspace — check the folder, then write a
-      // fresh temp file and rename it over whatever entry sits at the name
-      const realRoot = fs.realpathSync(artRoot);
-      const realDir = fs.realpathSync(path.dirname(abs));
-      if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
-        skip(url, `not saved: artifacts/${folder} leads outside the workspace, left on the CDN`);
+      const tmp = `${abs}.${process.pid}-${Date.now()}.part`;
+      // a full disk or a read-only folder must not lose a paid result: that output
+      // stays on the CDN, and the spend is still recorded by finish
+      try {
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        // the name is predictable: a symlinked folder or file planted there must not
+        // redirect the write outside the workspace — check the folder, then write a
+        // fresh temp file and rename it over whatever entry sits at the name
+        const realRoot = fs.realpathSync(artRoot);
+        const realDir = fs.realpathSync(path.dirname(abs));
+        if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
+          skip(url, `not saved: artifacts/${folder} leads outside the workspace, left on the CDN`);
+          continue;
+        }
+        fs.writeFileSync(tmp, buf, { flag: "wx" });
+        fs.renameSync(tmp, abs);
+      } catch (e) {
+        try {
+          fs.rmSync(tmp, { force: true });
+        } catch {}
+        skip(url, `not saved (${e?.code ?? e?.message ?? e}), left on the CDN`);
         continue;
       }
-      const tmp = `${abs}.${process.pid}-${Date.now()}.part`;
-      fs.writeFileSync(tmp, buf, { flag: "wx" });
-      fs.renameSync(tmp, abs);
-      ctx.artifacts.annotate(call.workspace, rel, {
-        agent: call.agent,
-        taskId: call.taskId,
-        description: `LoreMax ${generation?.workflow ?? workflowSlug} · generation ${generationId}${note ? ` · ${note}` : ""}`.slice(0, 300),
-        action: "generated",
-        // how it was made: the studio's Source card reads provider, workflow and params.image_urls
-        generation,
-      });
+      // the file is on disk: a provenance hiccup only costs the sidecar
+      try {
+        ctx.artifacts.annotate(call.workspace, rel, {
+          agent: call.agent,
+          taskId: call.taskId,
+          description: `LoreMax ${generation?.workflow ?? workflowSlug} · generation ${generationId}${note ? ` · ${note}` : ""}`.slice(0, 300),
+          action: "generated",
+          // how it was made: the studio's Source card reads provider, workflow and params.image_urls
+          generation,
+        });
+      } catch (e) {
+        ctx.log.warn(`loremax provenance for ${rel}: ${e?.message ?? e}`);
+      }
       rels.push(rel);
     }
     if (rels.length) ctx.artifacts.mirror(call.workspace, rels);
@@ -497,7 +528,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       const generationId = String(sub.generationId);
       const tokensCost = Number(sub.tokensCost) || 0;
       ctx.log.info(`@${call.agent} loremax ${workflow} → generation ${generationId} (${tokensCost} tk)`);
-      const job = { generationId, workflow, inputs, references, tokensCost, note };
+      // the workspace rides along: loremax_result answers only the one that started it
+      const job = { generationId, workspace: call.workspace, workflow, inputs, references, tokensCost, note };
       // only an async reply has a job to poll: any other one ran synchronously and is finished
       // (a failed run is a 500), its outputs are in the reply and /check would answer 400
       if (sub.async !== true) {
@@ -539,14 +571,17 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       const generationId = String(args.generation_id ?? "").trim();
       if (!generationId) throw new Error("generation_id is required — loremax_generate hands it back");
       // job rows are per plugin, not per workspace, and LoreMax ids are sequential:
-      // only this workspace's generations are reachable from here
+      // only this workspace's generations are reachable from here — an id nothing
+      // here owns (unknown, or lost with a restart on a core without jobs) is refused
       const notYours = `generation ${generationId} was not started from this workspace — use the generation_id loremax_generate handed back`;
       const found = ctx.jobs?.find?.(generationId) ?? null;
-      if (ctx.jobs && !found && !generations.has(generationId)) throw new Error(notYours);
+      const row = ctx.jobs?.pending().find((j) => j.externalId === generationId);
+      // settled rows carry the workspace in their result (the host's find() has no workspace column)
+      const owner = generations.get(generationId)?.workspace ?? row?.workspace ?? found?.result?.workspace ?? found?.workspace;
+      if (owner !== call.workspace) throw new Error(notYours);
       // settled already (by the tool or the watcher): the files are on disk, no new download
       if (found?.status === "succeeded") {
         const r = found.result ?? {};
-        if (r.workspace && r.workspace !== call.workspace) throw new Error(notYours);
         const artifacts = r.artifacts ?? [];
         return text(JSON.stringify({
           generation_id: generationId,
@@ -558,8 +593,6 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         }, null, 1));
       }
       if (found?.status === "failed") return text(JSON.stringify({ generation_id: generationId, status: "failed", error: found.error }, null, 1));
-      const row = ctx.jobs?.pending().find((j) => j.externalId === generationId);
-      if (row && row.workspace !== call.workspace) throw new Error(notYours);
       // the generate call or the watcher is fetching it right now: one download, one settle
       if (inFlight.has(generationId))
         return text(JSON.stringify({ generation_id: generationId, status: "in_progress", hint: "being checked and saved right now — call loremax_result again in a moment" }, null, 1));
@@ -592,7 +625,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         if (c?.status === "failed") {
           generations.delete(generationId);
           const error = String(c.error ?? "unknown error");
-          if (trackedId && ctx.jobs) ctx.jobs.settle(trackedId, { status: "failed", error: `${error}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300) });
+          if (trackedId && ctx.jobs)
+            ctx.jobs.settle(trackedId, { status: "failed", result: { workspace: call.workspace }, error: `${error}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300) });
           throw new Error(`LoreMax generation ${generationId} failed: ${error}`);
         }
         if (now() - started >= waitMs) break;
@@ -634,7 +668,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         try {
           if (now() - Date.parse(j.createdAt) > GIVE_UP_MS) {
             generations.delete(j.externalId);
-            ctx.jobs.settle(j.id, { status: "failed", error: "gave up after 6h" });
+            ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error: "gave up after 6h" });
             wake(`${what} did not finish within 6h and was given up. Check it on LoreMax or run it again${task}.`);
             continue;
           }
@@ -644,12 +678,17 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
             const done = await outputs.finish(call, job, c);
             generations.delete(j.externalId);
-            const list = done.artifacts.map((a) => `artifacts/${a}`).join(", ") || "(LoreMax returned no files)";
+            const saved = done.artifacts.map((a) => `artifacts/${a}`).join(", ");
+            // outputs that could not be downloaded are still paid for and on the CDN: hand the agent their URLs
+            const onCdn = done.left_on_cdn?.length
+              ? `not downloaded (failed or over the size cap), still on LoreMax's CDN: ${done.left_on_cdn.join(", ")}`
+              : "";
+            const list = [saved, onCdn].filter(Boolean).join("; ") || "(LoreMax returned no files)";
             wake(`${what} finished: ${list} — check them, then continue where you left off${task}.`);
           } else if (c?.status === "failed") {
             generations.delete(j.externalId);
             const error = `${c.error ?? "unknown error"}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300);
-            ctx.jobs.settle(j.id, { status: "failed", error });
+            ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error });
             wake(`${what} FAILED: ${error}. Decide whether to retry (other inputs or workflow) or report the blocker${task}.`);
           }
         } catch (e) {

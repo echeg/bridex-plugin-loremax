@@ -276,3 +276,24 @@ test("default_wait_s from config sets the wait; an emptied or bogus value falls 
     assert.match(r.hint, new RegExp(`after ${waited}s`), `default_wait_s=${JSON.stringify(value)}`);
   }
 });
+
+test("loremax_result without ctx.jobs (older core): only the starting workspace's generations, unknown ids refused", async () => {
+  const f0 = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  delete f0.ctx.jobs;
+  const clock = { t: 0 };
+  await activate(f0.ctx, { pollMs: 1, now: () => clock.t });
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => EXECUTE],
+    ["POST", "/check", () => ((clock.t += 20_000), { status: "pending" })],
+  ]);
+  restore = f.restore;
+  await f0.rec.tools.get("loremax_generate").handler({ workflow_id: "w", inputs: {}, wait_s: 10 }, CALL);
+  const result = f0.rec.tools.get("loremax_result");
+  const checks = () => f.calls.filter((c) => c.url.endsWith("/check")).length;
+  const before = checks();
+  await assert.rejects(result.handler({ generation_id: "501" }, { ...CALL, workspace: "other" }), /not started from this workspace/);
+  await assert.rejects(result.handler({ generation_id: "777" }, CALL), /not started from this workspace/);
+  assert.equal(checks(), before);
+  const own = JSON.parse((await result.handler({ generation_id: "501" }, CALL)).content[0].text);
+  assert.equal(own.status, "in_progress");
+});

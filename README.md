@@ -12,8 +12,8 @@ Node ≥ 20 (built-in `fetch`, `FormData`, `Blob`, `node:test`; no dependencies)
 Job tracking, the reboot-proof watcher and the agent wake-up need a Bridex core
 with `ctx.jobs` / `ctx.wakeAgent`; the out-of-funds card needs `ctx.billing` and
 the balance tile `ctx.registerStat`. On older cores the plugin still loads: a
-generation that outlives the wait is polled with `loremax_result`, and there is
-no card or tile.
+generation that outlives the wait is polled with `loremax_result` (until a
+restart: the generation ids live in memory there), and there is no card or tile.
 
 ## Install
 
@@ -61,9 +61,10 @@ suffix when one generation returns several files) inside the task's artifact
 folder, or `artifacts/loremax/` outside a task. The slug is the `workflow_id`
 lower-cased with every non `[a-z0-9]` run turned into `-`, so workflow `12`
 gives `12-501.png` and `Flux Portrait v2` gives `flux-portrait-v2-501.png`.
-Originals are preferred over previews, previews over external URLs. A file over 512 MB, or one whose
-download fails, stays on LoreMax's CDN: the reply lists its URL under
-`left_on_cdn`. A synchronous workflow (any execute reply that isn't `async`)
+Originals are preferred over previews, previews over external URLs. A file over 512 MB, one whose
+download fails, or one that can't be written (full disk, no permission) stays on
+LoreMax's CDN: the reply (and the watcher's wake-up) lists its URL under
+`left_on_cdn`, and the spend is recorded all the same. A synchronous workflow (any execute reply that isn't `async`)
 returns its outputs in the execute reply; they are saved the same way, with no
 polling. If the execute call gets no reply at all (timeout or dropped
 connection), the error says the generation may already have been charged, so

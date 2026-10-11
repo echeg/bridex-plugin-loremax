@@ -223,3 +223,46 @@ test("saveOutputs: a task folder symlinked outside the workspace is not written 
   assert.deepEqual(rels, { artifacts: [], skipped: [`${CDN}/ok`] });
   assert.deepEqual(fs.readdirSync(outside), []);
 });
+
+test("saveOutputs: an undeclared size over the cap is cancelled mid-stream, never buffered whole", async () => {
+  let pulls = 0;
+  let cancelled = false;
+  const endless = () =>
+    new Response(new ReadableStream({ pull: (c) => (pulls++, c.enqueue(new Uint8Array(4))), cancel: () => (cancelled = true) }), { headers: { "content-type": "image/png" } });
+  const f = mockFetch([["GET", `${CDN}/endless`, endless]]);
+  restore = f.restore;
+  const s = setup({ downloadCap: 10 });
+  const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/endless`] }, "", {});
+  assert.deepEqual(rels, { artifacts: [], skipped: [`${CDN}/endless`] });
+  assert.ok(cancelled);
+  assert.ok(pulls <= 5);
+});
+
+test("finish: a local save error leaves that output on the CDN, spend is still recorded", async () => {
+  const f = mockFetch([["GET", `${CDN}/ok`, () => file("OK", "image/png")]]);
+  restore = f.restore;
+  const s = setup();
+  // the task folder's name is taken by a file: mkdir fails like a read-only or full disk would
+  const art = s.ctx.paths.workspaceArtifacts("studio");
+  fs.mkdirSync(art, { recursive: true });
+  fs.writeFileSync(path.join(art, "task-7"), "not a folder");
+  const reply = await s.finish(CALL, { generationId: 9, workflow: "w", tokensCost: 3, trackedId: null }, { result: { originalUrls: [`${CDN}/ok`] } });
+  assert.deepEqual(reply.artifacts, []);
+  assert.deepEqual(reply.left_on_cdn, [`${CDN}/ok`]);
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.usage[0].units, 3);
+  assert.ok(s.rec.logs.some((l) => l.level === "warn" && /not saved \(/.test(l.msg)));
+});
+
+test("saveOutputs: a failing annotate keeps the saved file in the reply", async () => {
+  const f = mockFetch([["GET", `${CDN}/ok`, () => file("OK", "image/png")]]);
+  restore = f.restore;
+  const s = setup();
+  s.ctx.artifacts.annotate = () => {
+    throw new Error("sidecar locked");
+  };
+  const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/ok`] }, "", {});
+  assert.deepEqual(rels, { artifacts: ["task-7/w-g.png"], skipped: [] });
+  assert.equal(s.read("task-7/w-g.png"), "OK");
+  assert.ok(s.rec.logs.some((l) => /sidecar locked/.test(l.msg)));
+});
