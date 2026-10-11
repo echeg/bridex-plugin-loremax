@@ -282,3 +282,34 @@ test("loremax_result while the watcher is saving the same generation: in_progres
   assert.equal(s.rec.usage.length, 1);
   assert.equal(s.jobs[0].status, "succeeded");
 });
+
+test("watcher: a job a tool call finished while the pass was busy elsewhere is not saved, billed or woken again", async () => {
+  const s = await setup();
+  s.track({ externalId: "501" });
+  s.track({ externalId: "502", label: "second" });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const B = { status: "completed", result: { originalUrls: [`${CDN}/b.png`], previewUrls: [], contentTypes: ["image/png"] } };
+  const f = mockFetch([
+    checkRoute(s, [DONE], "501"),
+    checkRoute(s, [B], "502"),
+    ["GET", `${CDN}/out.png`, async () => {
+      await gate;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+    ["GET", `${CDN}/b.png`, () => new Response("B", { headers: { "content-type": "image/png" } })],
+  ]);
+  restore = f.restore;
+  // the pass reads [501, 502] and sits on 501's download while loremax_result finishes 502
+  const watching = s.watchOnce();
+  await new Promise((r) => setTimeout(r, 10));
+  const reply = await s.run({ generation_id: "502", wait_s: 5 });
+  assert.equal(reply.status, "completed");
+  release();
+  await watching;
+  assert.equal(f.calls.filter((c) => c.url.includes("/502/check")).length, 1);
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/b.png")).length, 1);
+  assert.equal(s.rec.usage.length, 2);
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /501/);
+});

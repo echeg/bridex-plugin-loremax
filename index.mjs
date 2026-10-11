@@ -251,25 +251,28 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       skipped.push(url);
     };
     const overCap = `exceeds the ${Math.round(downloadCap / 1e6)}MB cap, left on the CDN`;
+    const artRoot = ctx.paths.workspaceArtifacts(call.workspace);
     for (const [i, url] of urls.entries()) {
       let res;
+      let buf;
       try {
         res = await fetch(url, { signal: AbortSignal.timeout(300_000), redirect: "follow" });
+        if (!res.ok) {
+          skip(url, `download failed (${res.status})`);
+          continue;
+        }
+        // a declared size over the cap is skipped before pulling the body
+        if (Number(res.headers.get("content-length")) > downloadCap) {
+          await res.body?.cancel();
+          skip(url, overCap);
+          continue;
+        }
+        // the body read can time out or reset too: that output stays on the CDN, the rest still finishes
+        buf = Buffer.from(await res.arrayBuffer());
       } catch (e) {
         skip(url, `download failed (${e?.message ?? e})`);
         continue;
       }
-      if (!res.ok) {
-        skip(url, `download failed (${res.status})`);
-        continue;
-      }
-      // a declared size over the cap is skipped before pulling the body
-      if (Number(res.headers.get("content-length")) > downloadCap) {
-        await res.body?.cancel();
-        skip(url, overCap);
-        continue;
-      }
-      const buf = Buffer.from(await res.arrayBuffer());
       if (buf.byteLength > downloadCap) {
         skip(url, overCap);
         continue;
@@ -283,9 +286,20 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       const ext = EXT_BY_MIME[declared] ?? EXT_BY_MIME[served] ?? (urlExt || "bin");
       const name = `${workflowSlug}-${id}${urls.length > 1 ? `-${i + 1}` : ""}.${ext}`;
       const rel = path.posix.join(folder, name);
-      const abs = path.join(ctx.paths.workspaceArtifacts(call.workspace), rel);
+      const abs = path.join(artRoot, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, buf);
+      // the name is predictable: a symlinked folder or file planted there must not
+      // redirect the write outside the workspace — check the folder, then write a
+      // fresh temp file and rename it over whatever entry sits at the name
+      const realRoot = fs.realpathSync(artRoot);
+      const realDir = fs.realpathSync(path.dirname(abs));
+      if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
+        skip(url, `not saved: artifacts/${folder} leads outside the workspace, left on the CDN`);
+        continue;
+      }
+      const tmp = `${abs}.${process.pid}-${Date.now()}.part`;
+      fs.writeFileSync(tmp, buf, { flag: "wx" });
+      fs.renameSync(tmp, abs);
       ctx.artifacts.annotate(call.workspace, rel, {
         agent: call.agent,
         taskId: call.taskId,
@@ -589,6 +603,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
     try {
       for (const j of ctx.jobs.pending()) {
         if (inFlight.has(j.externalId)) continue;
+        // the list is read once per pass and a pass can take minutes (downloads):
+        // a tool call may have finished this one meanwhile — don't save, bill and wake twice
+        const cur = ctx.jobs.find?.(j.externalId);
+        if (cur && cur.status !== "running") continue;
         inFlight.add(j.externalId);
         const wake = (prompt) =>
           ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-job:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}), prompt });

@@ -180,3 +180,46 @@ test("finish: outputs that could not be downloaded come back as left_on_cdn, in 
   assert.match(reply.hint, /left_on_cdn/);
   assert.deepEqual(s.jobs[0].result.left_on_cdn, [`${CDN}/gone`]);
 });
+
+test("saveOutputs: a body that breaks mid-download is left on the CDN, the rest still saves", async () => {
+  const broken = () => new Response(new ReadableStream({ start: (c) => c.error(new Error("connection reset")) }), { headers: { "content-type": "image/png" } });
+  const f = mockFetch([
+    ["GET", `${CDN}/broken`, broken],
+    ["GET", `${CDN}/ok`, () => file("OK", "image/png")],
+  ]);
+  restore = f.restore;
+  const s = setup();
+  const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/broken`, `${CDN}/ok`] }, "", {});
+  assert.deepEqual(rels, { artifacts: ["task-7/w-g-2.png"], skipped: [`${CDN}/broken`] });
+  assert.ok(s.rec.logs.some((l) => l.level === "warn" && /download failed \(connection reset\)/.test(l.msg)));
+});
+
+test("saveOutputs: a symlink planted at the output name is replaced, its target untouched", async () => {
+  const f = mockFetch([["GET", `${CDN}/ok`, () => file("OK", "image/png")]]);
+  restore = f.restore;
+  const s = setup();
+  const outside = path.join(s.dir, "host.db");
+  fs.writeFileSync(outside, "DB");
+  const dir = path.join(s.ctx.paths.workspaceArtifacts(CALL.workspace), "task-7");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.symlinkSync(outside, path.join(dir, "w-g.png"));
+  const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/ok`] }, "", {});
+  assert.deepEqual(rels, { artifacts: ["task-7/w-g.png"], skipped: [] });
+  assert.equal(fs.readFileSync(outside, "utf8"), "DB");
+  assert.equal(fs.lstatSync(path.join(dir, "w-g.png")).isSymbolicLink(), false);
+  assert.equal(s.read("task-7/w-g.png"), "OK");
+});
+
+test("saveOutputs: a task folder symlinked outside the workspace is not written into", async () => {
+  const f = mockFetch([["GET", `${CDN}/ok`, () => file("OK", "image/png")]]);
+  restore = f.restore;
+  const s = setup();
+  const outside = path.join(s.dir, "elsewhere");
+  fs.mkdirSync(outside);
+  const art = s.ctx.paths.workspaceArtifacts(CALL.workspace);
+  fs.mkdirSync(art, { recursive: true });
+  fs.symlinkSync(outside, path.join(art, "task-7"));
+  const rels = await s.saveOutputs(CALL, "w", "g", { originalUrls: [`${CDN}/ok`] }, "", {});
+  assert.deepEqual(rels, { artifacts: [], skipped: [`${CDN}/ok`] });
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
