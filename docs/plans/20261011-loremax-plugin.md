@@ -155,28 +155,32 @@
 - [x] run `npm test` - must pass before task 3
 
 ### Task 3: Output saving with provenance
-- [ ] add `resolveLocal(ws, p)` (copy of fal's jail: `artifacts/…` → `paths.workspaceArtifacts`, else relative to
+- [x] add `resolveLocal(ws, p)` (copy of fal's jail: `artifacts/…` → `paths.workspaceArtifacts`, else relative to
       `paths.workspaceWorkdir`; outside → throw; missing → throw) and `EXT_BY_MIME`/`MIME_BY_EXT` maps for png/jpg/webp/gif/
       svg/mp4/webm/mov
-- [ ] add `saveOutputs(call, workflowSlug, generationId, result, note, generation)`: URLs = `result.originalUrls` when
+- [x] add `saveOutputs(call, workflowSlug, generationId, result, note, generation)`: URLs = `result.originalUrls` when
       non-empty else `result.previewUrls`; download each with `redirect: "follow"`, 300 s timeout, 512 MB cap (skip and
       warn above it); extension from `result.contentTypes[i]`, else the response `Content-Type`, else the URL path, else
       `bin`; file `artifacts/<call.taskId ?? "loremax">/<workflowSlug>-<generationId>[-<i+1>].<ext>`; `ctx.artifacts.annotate`
       with `{agent, taskId, description: "LoreMax <workflow> · generation <id> · <note>" ≤ 300, action: "generated",
       generation}`; `ctx.artifacts.mirror(ws, rels)`; return `rels`
-- [ ] add `finish(call, job, check)`: builds `generation = { provider: "LoreMax", workflow: <visual_id or id>, params:
+- [x] add `finish(call, job, check)`: builds `generation = { provider: "LoreMax", workflow: <visual_id or id>, params:
       {...inputs, ...(references.length ? { image_urls: references } : {})}, externalId: String(generationId),
       ...(costUsd ? { costUsd } : {}) }` where `costUsd = tokensCost * cfg.usd_per_token`; calls `saveOutputs`;
       `ctx.usage.record({ workspace, agent, kind: "loremax", model: workflow, costUsd, units: tokensCost, unit: "tk", taskId })`;
       `ctx.jobs?.settle(trackedId, { status: "succeeded", result: { artifacts, tokensCost } })`; returns the tool reply
       `{ generation_id, status: "completed", workflow, artifacts, tokens_cost, cost_usd?, hint: "reference outputs as
       [media: artifacts/<path>]" }`
-- [ ] write tests `test/save.test.mjs`: two outputs with `contentTypes` → two files named `<slug>-<id>-1.png`,
+- [x] write tests `test/save.test.mjs`: two outputs with `contentTypes` → two files named `<slug>-<id>-1.png`,
       `<slug>-<id>-2.webp`, sidecar `generation` carries provider/workflow/params with `image_urls`/externalId/costUsd,
       `mirror` called with both rels, `usage.record` carries units/unit and costUsd (0 when `usd_per_token` unset);
       `previewUrls` fallback; a failed download is skipped with a warning; the jail rejects `../outside.png` and a path
       outside the workspace; files over the cap are skipped
-- [ ] run `npm test` - must pass before task 4
+- [x] run `npm test` - must pass before task 4
+- ➕ note: the jail, `saveOutputs` and `finish` live in an exported `createOutputs(ctx, lmx, { downloadCap })` so tests
+      reach them directly; `finish(call, job, check)` takes `job = { generationId, workflow, inputs, references, tokensCost,
+      trackedId, note }` and returns the reply as an object (task 4's tool and task 5's watcher both use `artifacts`);
+      a declared `Content-Length` over the cap is skipped before the body is pulled; a reply with no files already says so
 
 ### Task 4: `loremax_generate` — execute, track, wait
 - [ ] register `loremax_generate` with schema `{ workflow_id: string, inputs: record, references?: string[] (max 20),
