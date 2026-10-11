@@ -183,30 +183,34 @@
       a declared `Content-Length` over the cap is skipped before the body is pulled; a reply with no files already says so
 
 ### Task 4: `loremax_generate` — execute, track, wait
-- [ ] register `loremax_generate` with schema `{ workflow_id: string, inputs: record, references?: string[] (max 20),
+- [x] register `loremax_generate` with schema `{ workflow_id: string, inputs: record, references?: string[] (max 20),
       wait_s?: int 10..1500, note?: string ≤ 200, }` and a description: inputs exactly as `loremax_workflows` names them,
       references are `artifacts/…` paths or workspace files (each ≤ 20 MB) sent as files, outputs land in the task's
       artifacts with provenance, every call is PAID in LoreMax tokens, read the price first, on timeout you get a
       `generation_id` and are WOKEN when it lands
-- [ ] build the request: without references `POST /api/v2/workflow/execute` JSON `{ workflowId, inputs }`; with references
+- [x] build the request: without references `POST /api/v2/workflow/execute` JSON `{ workflowId, inputs }`; with references
       a `FormData` with `workflowId`, `inputs` (JSON string), `fileCount`, `file_<i>` as `Blob` (type from `MIME_BY_EXT`,
       filename = basename) after `resolveLocal` and a 20 MB per-file check
-- [ ] on `{generationId, tokensCost}`: `ctx.log.info`, `trackedId = ctx.jobs?.track({ workspace, agent, taskId, sessionKey,
+- [x] on `{generationId, tokensCost}`: `ctx.log.info`, `trackedId = ctx.jobs?.track({ workspace, agent, taskId, sessionKey,
       runId, externalId: String(generationId), model: workflow_id, label: note ?? inputs.prompt?.slice(0,120) ?? "" })`;
       remember `{ inputs, references, tokensCost, workflow }` in an in-memory map by generationId (the watcher in task 5
       falls back to the job row when the map is empty after a restart)
-- [ ] poll `POST /api/v2/generations/<id>/check` every 3 s until `wait_s` (default `cfg.default_wait_s`): `completed` →
+- [x] poll `POST /api/v2/generations/<id>/check` every 3 s until `wait_s` (default `cfg.default_wait_s`): `completed` →
       `finish`; `failed` (or HTTP 500 with `status: "failed"`) → `jobs.settle failed` with `error`/`errorType` and throw
       `LoreMax generation <id> failed: <error>`; `pending`/`checking` → keep waiting; on timeout reply `{ generation_id,
       status: "in_progress", tokens_cost, hint: jobs ? "still rendering after Ns — end your turn if nothing else is
       pending: you will be WOKEN when it lands (or poll loremax_result)" : "… call loremax_result" }`
-- [ ] write tests `test/generate.test.mjs`: JSON path end to end (execute body, check polled until completed, artifacts
+- [x] write tests `test/generate.test.mjs`: JSON path end to end (execute body, check polled until completed, artifacts
       written, annotate/usage/settle recorded, reply shape); multipart path (body is `FormData` with `fileCount: 2`,
       `file_0`/`file_1` blobs, `inputs` JSON string; `generation.params.image_urls` lists the two reference paths); a
       reference outside the workspace or over 20 MB throws before any HTTP call; timeout returns `in_progress` and the job
       stays tracked; `failed` check settles the job as failed and throws with LoreMax's error; 402 on execute → `outOfFunds`
       and no job tracked
-- [ ] run `npm test` - must pass before task 5
+- [x] run `npm test` - must pass before task 5
+- ➕ note: `activate(ctx, { pollMs, now })` takes a test-only second argument (poll interval and clock; the host passes
+      only ctx); the `/check` call is `lmx.check(id)` in `createClient` (it turns LoreMax's HTTP 500 `status: "failed"`
+      body into a normal reply) so the task 5 watcher reuses it; a check that errors any other way throws with the
+      generation id and a `loremax_result` hint and leaves the job tracked; the in-memory map lives inside `activate`
 
 ### Task 5: `loremax_result`, the reboot-proof watcher, check and balance tile
 - [ ] register `loremax_result` with schema `{ generation_id: string, wait_s?: int 0..1500 }`: find the tracked job via

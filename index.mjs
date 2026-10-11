@@ -26,6 +26,10 @@ const RETRY_AFTER_DEFAULT_S = 5;
 const REPLY_CAP = 14_000;
 /** Outputs bigger than this stay on LoreMax's CDN (same cap as fal). */
 const DOWNLOAD_CAP = 512 * 1024 * 1024;
+/** References are sent inline in the execute request (same cap as media's REF_CAP). */
+const REF_CAP = 20 * 1024 * 1024;
+const MAX_REFS = 20;
+const POLL_MS = 3_000;
 const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
 
 const EXT_BY_MIME = {
@@ -163,7 +167,21 @@ export function createClient(ctx) {
     return out && typeof out === "object" && "data" in out ? out.data : out;
   }
 
-  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, usdPerToken, restJson, mcpCall };
+  /** One /check of a generation; LoreMax answers a failed one with HTTP 500 and `status: "failed"` in the body. */
+  async function check(generationId) {
+    try {
+      return await restJson(`/api/v2/generations/${encodeURIComponent(generationId)}/check`, { method: "POST" }, 30_000);
+    } catch (e) {
+      let body;
+      try {
+        body = JSON.parse(e?.body ?? "");
+      } catch {}
+      if (body?.status === "failed") return body;
+      throw e;
+    }
+  }
+
+  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, usdPerToken, restJson, mcpCall, check };
 }
 
 /** `flux-portrait`, `12`, `My Workflow!` → a file-name-safe slug. */
@@ -289,8 +307,15 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
   return { resolveLocal, saveOutputs, finish };
 }
 
-export default async function activate(ctx) {
+/** `opts` is for tests only (the host passes just ctx): poll interval and clock. */
+export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now } = {}) {
   const lmx = createClient(ctx);
+  const outputs = createOutputs(ctx, lmx);
+  /**
+   * What finish needs beyond the job row, by LoreMax generation id. Lost on a
+   * restart: the watcher then rebuilds from job.model and job.label only.
+   */
+  const generations = new Map();
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
@@ -339,6 +364,107 @@ export default async function activate(ctx) {
         out.price = `unavailable: ${short(e?.message ?? e)}`;
       }
       return text(cap(JSON.stringify(out, null, 1)));
+    },
+  });
+
+  /** Reference paths → absolute files, all checked before anything is sent (or paid for). */
+  function loadReferences(ws, refs) {
+    if (refs.length > MAX_REFS) throw new Error(`at most ${MAX_REFS} references per generation, got ${refs.length}`);
+    return refs.map((p) => {
+      const abs = outputs.resolveLocal(ws, p);
+      const size = fs.statSync(abs).size;
+      if (size > REF_CAP) throw new Error(`reference ${p} is ${(size / 1e6).toFixed(1)}MB; the plugin sends up to ${REF_CAP / 1024 / 1024}MB per file`);
+      return abs;
+    });
+  }
+
+  ctx.registerTool({
+    name: "loremax_generate",
+    description:
+      "Run a LoreMax workflow (image or video) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. If the wait runs out you get a generation_id back and are WOKEN when it lands (or poll loremax_result).",
+    schema: {
+      workflow_id: z.string().describe("numeric id or visual id from loremax_workflows"),
+      inputs: z.record(z.string(), z.unknown()).describe("workflow inputs, exactly as loremax_workflows names the input fields"),
+      references: z.array(z.string()).max(MAX_REFS).optional().describe("artifacts/<path> or workspace files sent as reference images/videos"),
+      wait_s: z.number().int().min(10).max(1500).optional().describe("seconds to wait before handing back the generation_id (default from config, 180)"),
+      note: z.string().max(200).optional().describe("short provenance note stored on the outputs (what this is for)"),
+    },
+    handler: async (args, call) => {
+      const workflow = String(args.workflow_id ?? "").trim();
+      if (!workflow) throw new Error("workflow_id is required — pick one from loremax_workflows");
+      const inputs = args.inputs ?? {};
+      const references = (args.references ?? []).map(String);
+      const files = loadReferences(call.workspace, references);
+      const note = String(args.note ?? (typeof inputs.prompt === "string" ? inputs.prompt.slice(0, 120) : ""));
+
+      let init;
+      if (files.length) {
+        // multipart: LoreMax routes each upload into image_urls / video_urls / audio_urls by its type
+        const form = new FormData();
+        form.append("workflowId", workflow);
+        form.append("inputs", JSON.stringify(inputs));
+        form.append("fileCount", String(files.length));
+        files.forEach((abs, i) => {
+          const type = MIME_BY_EXT[path.extname(abs).slice(1).toLowerCase()] ?? "application/octet-stream";
+          form.append(`file_${i}`, new Blob([fs.readFileSync(abs)], { type }), path.basename(abs));
+        });
+        init = { method: "POST", body: form };
+      } else {
+        init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflowId: workflow, inputs }) };
+      }
+      const sub = await lmx.restJson("/api/v2/workflow/execute", init, 120_000);
+      if (sub?.generationId == null) throw new Error(`loremax execute returned no generationId: ${JSON.stringify(sub).slice(0, 300)}`);
+      const generationId = String(sub.generationId);
+      const tokensCost = Number(sub.tokensCost) || 0;
+      ctx.log.info(`@${call.agent} loremax ${workflow} → generation ${generationId} (${tokensCost} tk)`);
+      // tracked from the first second: a restart mid-wait loses neither the
+      // generation nor the tokens — the watcher finishes it and wakes the agent
+      const trackedId = ctx.jobs
+        ? ctx.jobs.track({
+          workspace: call.workspace,
+          agent: call.agent,
+          taskId: call.taskId ?? null,
+          sessionKey: call.sessionKey ?? null,
+          runId: call.runId ?? null,
+          externalId: generationId,
+          model: workflow,
+          label: note,
+        })
+        : null;
+      const job = { generationId, workflow, inputs, references, tokensCost, trackedId, note };
+      generations.set(generationId, job);
+
+      const waitMs = Number(args.wait_s ?? lmx.cfg.default_wait_s) * 1000;
+      const started = now();
+      while (now() - started < waitMs) {
+        let c;
+        try {
+          c = await lmx.check(generationId);
+        } catch (e) {
+          // the generation goes on (and is tracked): don't present a status hiccup as a lost render
+          throw new Error(`LoreMax generation ${generationId} status check failed: ${e?.message ?? e} — it may still finish; poll loremax_result with this generation_id`);
+        }
+        if (c?.status === "completed") {
+          generations.delete(generationId);
+          return text(JSON.stringify(await outputs.finish(call, job, c), null, 1));
+        }
+        if (c?.status === "failed") {
+          generations.delete(generationId);
+          const error = String(c.error ?? "unknown error");
+          if (trackedId) ctx.jobs.settle(trackedId, { status: "failed", error: `${error}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300) });
+          throw new Error(`LoreMax generation ${generationId} failed: ${error}`);
+        }
+        await sleep(pollMs);
+      }
+      const waited = Math.round(waitMs / 1000);
+      return text(JSON.stringify({
+        generation_id: generationId,
+        status: "in_progress",
+        tokens_cost: tokensCost,
+        hint: ctx.jobs
+          ? `still rendering after ${waited}s — end your turn if nothing else is pending: you will be WOKEN when it lands (or poll loremax_result)`
+          : `still rendering after ${waited}s — call loremax_result with this generation_id (the work continues on LoreMax's side)`,
+      }, null, 1));
     },
   });
 
