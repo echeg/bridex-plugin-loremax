@@ -1,0 +1,43 @@
+# loremax — image and video generation through LoreMax (loremax.ai) workflows:
+# list the organization's workflows, read their input fields and price, run one
+# with workspace files as references.
+# kind MUST stay "integration": the plugin writes outputs into workspace
+# artifacts with provenance, records spend, tracks jobs and wakes agents —
+# in-process facilities that a catalog "tool" plugin (out-of-process, flat
+# schemas) does not have.
+name: loremax
+version: 0.1.0
+kind: integration
+description: LoreMax workflows for agents — images and video. Outputs land in the task's artifacts with provenance and token spend.
+entry: index.mjs
+requires_env:
+  - LOREMAX_API_KEY    # managed credential: Settings → Integrations → LoreMax key (lmx_prod_…)
+  - LOREMAX_BASE_URL   # managed credential: LoreMax address, empty = https://loremax.ai
+config_schema:
+  type: object
+  properties:
+    api_key:
+      type: string
+      title: API key
+      secret: true
+      credential: LOREMAX_API_KEY
+      placeholder: "${LOREMAX_API_KEY}"
+      description: Leave empty to use the LoreMax key from Settings → Integrations
+    base_url:
+      type: string
+      title: Base URL
+      credential: LOREMAX_BASE_URL
+      placeholder: "${LOREMAX_BASE_URL}"
+      description: default https://loremax.ai
+    default_wait_s:
+      type: integer
+      title: Wait before handing back, s
+      default: 180
+      minimum: 10
+      maximum: 1500
+      description: How long loremax_generate waits for a result before returning a generation_id
+    usd_per_token:
+      type: number
+      title: USD per token
+      minimum: 0
+      description: price of one LoreMax token in USD for the spend charts; empty = record tokens only

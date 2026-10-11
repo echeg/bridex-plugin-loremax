@@ -110,32 +110,35 @@
 ## Implementation Steps
 
 ### Task 1: Manifest, package and the plugin skeleton
-- [ ] create `plugin.yaml`: `name: loremax`, `version: 0.1.0`, `kind: integration` (comment why, as fal does), `description`,
+- [x] create `plugin.yaml`: `name: loremax`, `version: 0.1.0`, `kind: integration` (comment why, as fal does), `description`,
       `entry: index.mjs`, `requires_env: [LOREMAX_API_KEY, LOREMAX_BASE_URL]`, `config_schema` with `api_key` (string,
       secret, `credential: LOREMAX_API_KEY`, placeholder `${LOREMAX_API_KEY}`), `base_url` (string, `credential:
       LOREMAX_BASE_URL`, placeholder `${LOREMAX_BASE_URL}`, description "default https://loremax.ai"), `default_wait_s`
       (integer, default 180, 10..1500), `usd_per_token` (number, minimum 0, description "price of one LoreMax token in USD
       for the spend charts; empty = record tokens only")
-- [ ] create `package.json` (`"type": "module"`, `"private": true`, `"scripts": {"test": "node --test test/"}`, no dependencies)
-- [ ] create `index.mjs` with `export default async function activate(ctx)`: `cfg = { api_key: "${LOREMAX_API_KEY}",
+- [x] create `package.json` (`"type": "module"`, `"private": true`, `"scripts": {"test": "node --test test/"}`, no dependencies)
+- [x] create `index.mjs` with `export default async function activate(ctx)`: `cfg = { api_key: "${LOREMAX_API_KEY}",
       base_url: "${LOREMAX_BASE_URL}", default_wait_s: 180, usd_per_token: 0, ...ctx.config }`; `resolveRef` for `${ENV}`;
       `key()` throws "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax" when empty; `baseUrl()` = resolved
       `base_url` or `https://loremax.ai`, trailing slashes stripped, must be http(s) or throw; when the key is unset at
       activate call `ctx.needsConfig(...)` once (tools still register, each call surfaces the error)
-- [ ] add `restJson(path, init, timeoutMs)`: `X-API-Key` header, `AbortSignal.timeout`, non-JSON guard; on 402 or
+- [x] add `restJson(path, init, timeoutMs)`: `X-API-Key` header, `AbortSignal.timeout`, non-JSON guard; on 402 or
       `/insufficient tokens/i` call `ctx.billing?.outOfFunds?.({ provider: "LoreMax", what: "image and video generation
       (loremax plugin)", detail })` then throw; on 429 wait `Retry-After` seconds (cap 30 s) and retry once, then throw
       `loremax 429 …`; other errors throw `loremax <status> <path>: <body ≤ 400 chars>`
-- [ ] add `mcpCall(tool, args)`: `POST ${baseUrl()}/api/mcp` with `Authorization: Bearer <key>`, `Content-Type` and
+- [x] add `mcpCall(tool, args)`: `POST ${baseUrl()}/api/mcp` with `Authorization: Bearer <key>`, `Content-Type` and
       `Accept: application/json`, body `{jsonrpc:"2.0", id, method:"tools/call", params:{name: tool, arguments: args}}`;
       parse `result.content[0].text` as `{success, data|error}` (also accept `result.structuredContent`); throw on
       JSON-RPC `error` or `success: false` with the LoreMax error text
-- [ ] write tests `test/config.test.mjs`: `${ENV}` resolution, base_url default and normalization (trailing slash,
+- [x] write tests `test/config.test.mjs`: `${ENV}` resolution, base_url default and normalization (trailing slash,
       rejects `ftp://`), missing key → `needsConfig` recorded and a tool call throws the Settings hint
-- [ ] write tests `test/http.test.mjs`: `restJson` sends `X-API-Key`; 402 → `outOfFunds` recorded + throw; 429 with
+- [x] write tests `test/http.test.mjs`: `restJson` sends `X-API-Key`; 402 → `outOfFunds` recorded + throw; 429 with
       `Retry-After: 1` → one retry then success; 429 twice → throw; `mcpCall` builds a `tools/call` envelope with Bearer
       and unwraps `{success,data}`, throws on `{success:false,error}` and on a JSON-RPC error object
-- [ ] run `npm test` - must pass before task 2
+- [x] run `npm test` - must pass before task 2
+- ➕ note: the client lives in an exported `createClient(ctx)` (the default `activate` uses it) so tests reach
+      `restJson`/`mcpCall` directly; `mcpCall` sends `Accept: application/json, text/event-stream` (the Streamable HTTP
+      pair) and also parses an SSE-framed reply; errors carry `status`/`body` for the task 4 `failed` path and the check
 
 ### Task 2: `loremax_workflows` — list, fields and price
 - [ ] register `loremax_workflows` with schema `{ workflow_id?: string, query?: string }` and a description saying it is
