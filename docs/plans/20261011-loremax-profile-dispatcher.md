@@ -274,24 +274,26 @@
 - [x] run `npm test` - must pass before task 5
 
 ### Task 5: Profile catalog cache
-- [ ] add `createProfileCatalog(lmx)` with `get({force})`: `tools/list` on the profile path, cached ~10 min, refreshed on `force` and after `SCHEMA_REVISION_MISMATCH`, `WORKFLOW_UNAVAILABLE`, `TOOL_NOT_FOUND`
-- [ ] classify a tool as a generation tool when `inputSchema.properties.schema_revision` exists and its name is not in the known service set (`get_balance`, `check_generation`, `request_upload_url`, `finalize_upload`, `upload_from_url`); everything else is a service tool
-- [ ] derive per generation tool:
+- [x] add `createProfileCatalog(lmx)` with `get({force})`: `tools/list` on the profile path, cached ~10 min, refreshed on `force` and after `SCHEMA_REVISION_MISMATCH`, `WORKFLOW_UNAVAILABLE`, `TOOL_NOT_FOUND`
+- [x] classify a tool as a generation tool when `inputSchema.properties.schema_revision` exists and its name is not in the known service set (`get_balance`, `check_generation`, `request_upload_url`, `finalize_upload`, `upload_from_url`); everything else is a service tool
+- [x] derive per generation tool:
   - `revision`: `inputSchema.properties.schema_revision.enum[0]`;
   - `agentSchema`: a deep copy without `schema_revision`, `api_key` and `on_behalf_of` in `properties` and `required`; vendor keys `x-loremax-*` are kept;
   - `fileArgs`: for each property with `x-loremax-media`, the name, `mediaType`, `role`, `cardinality`, `acceptedFormats`, `constraints` and `pairedWith`;
   - `limits`: root `x-loremax-limits`;
   - `identity`: from `_meta['loremax.ai/workflow']`, else `{title: tool.title ?? name}` (logged once);
   - `title` and `description`.
-- [ ] tolerate an unknown `x-loremax-media.version` (treat it as a plain URL argument and log once) and never throw on unexpected JSON
-- [ ] write tests with fixtures copied from the LoreMax docs (`test/fixtures/profile-tools-list.json`, with text, image-with-mask and controller tools):
+- [x] tolerate an unknown `x-loremax-media.version` (treat it as a plain URL argument and log once) and never throw on unexpected JSON
+- [x] write tests with fixtures copied from the LoreMax docs (`test/fixtures/profile-tools-list.json`, with text, image-with-mask and controller tools):
   - split and classification, including a tool without `_meta` that has `schema_revision`;
   - revision extraction and stripped fields;
   - `fileArgs` and `limits`;
   - identity and its fallback;
   - TTL and forced refresh;
   - malformed entries are skipped.
-- [ ] run `npm test` - must pass before task 6
+- ➕ API: `createProfileCatalog(lmx, {now, log})` → `get({force, deadline})` returns `{tools: Map name → {name, title, description, revision, agentSchema, fileArgs, limits, identity}, service: [names], fetchedAt}`; concurrent gets share one `tools/list`; `refreshAfter(err)` marks the cache stale for the three refresh codes and returns whether it did; `nextCursor` pages are followed defensively; a generation tool without a string revision is skipped with a warning (neither generation nor service)
+- ➕ the fixture is assembled from the doc examples (`text-tool` verbatim, `mask-extension`, `media-limits`) plus the property/condition shapes of LoreMax `workflowToolContract.ts` at 8b4e6b43; its `_source` key says which parts are made up
+- [x] run `npm test` - must pass before task 6
 
 ### Task 6: `loremax_workflows` in profile mode
 - [ ] in profile mode register `loremax_workflows` with schema `{tool?: string, query?: string}` and a mode-specific description (curated profile, free, no price). Without `tool`, list `{tool, title, category, description (first ~200 chars), required, file_args: [{name, mediaType, cardinality}]}`, filtered by `query` over tool, title, category and visualId.

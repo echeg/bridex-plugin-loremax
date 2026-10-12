@@ -1,0 +1,438 @@
+{
+  "_source": "LoreMax fluxgenerator docs/mcp-workflow-profiles.md at 8b4e6b43: write_text is the 'text-tool' example verbatim; masked_edit is workflow 7 assembled from the 'mask-extension' and 'media-limits' examples with the property/condition shapes of functions/services/mcp/workflowToolContract.ts; styled_portrait adds a controller (x-loremax-conditions) and an array image slot in the same shapes; revisions other than write_text's are made up",
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      {
+        "name": "write_text",
+        "title": "write_text",
+        "description": "Generate text with \"write_text\". Each call starts one paid generation. Copy schema_revision from tools/list. Poll check_generation with the returned generationId until status is completed; failed is terminal. Never resubmit automatically after a timeout: a second call is a second paid generation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "title": "Text"
+            },
+            "on_behalf_of": {
+              "type": "string",
+              "pattern": "^\\s*(?:[A-Za-z0-9._:@\\-]|[A-Za-z0-9._:@\\-][A-Za-z0-9._:@\\- ]{0,126}[A-Za-z0-9._:@\\-])\\s*$(?![\\s\\S])",
+              "not": {
+                "pattern": "(^|[^A-Za-z0-9])lmx_prod_[A-Za-z0-9]{32}(?![A-Za-z0-9])"
+              },
+              "description": "Optional display-only actor label; never an authorization identity. Trimmed, at most 128 characters. Letters, digits, spaces and . _ : @ - only; no credentials."
+            },
+            "schema_revision": {
+              "type": "string",
+              "enum": [
+                "ed28c0a088869cd4b2bb04358ed7c367a2d0fdb46103078fcd3e11a7d22a14f8"
+              ],
+              "description": "Copy from tools/list. Refresh tools/list if this revision is rejected."
+            },
+            "api_key": {
+              "type": "string",
+              "description": "Optional organization API key (lmx_prod_ + 32 alphanumeric characters). Same-organization overrides are allowed. Every profile tool, including status, balance and uploads, rejects a key for a different organization with PROFILE_ORGANIZATION_MISMATCH. Omit it to use the connection credentials."
+            }
+          },
+          "required": [
+            "schema_revision",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        },
+        "_meta": {
+          "loremax.ai/workflow": {
+            "version": 1,
+            "workflowId": 1,
+            "visualId": null,
+            "title": "write_text",
+            "category": "Text",
+            "contentType": "text",
+            "pipeline": false
+          }
+        }
+      },
+      {
+        "name": "masked_edit",
+        "title": "masked_edit",
+        "description": "Generate image with \"masked_edit\". Takes one source image and an optional PNG mask. Each call starts one paid generation. Copy schema_revision from tools/list. Poll check_generation with the returned generationId until status is completed; failed is terminal. Never resubmit automatically after a timeout: a second call is a second paid generation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "title": "Text"
+            },
+            "source": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://[^\\s/?#]+(?:/[^\\s#]*)?$(?![\\s\\S])",
+              "maxLength": 2048,
+              "title": "Source",
+              "description": "Finalized organization-owned image URL. Upload with request_upload_url and finalize_upload, or import with upload_from_url. Formats: png, jpg, jpeg, webp. Limits: {\"maxFileSizeMb\":50}. Repeated URLs count as separate input positions. Optional mask edit_mask applies to the first image.",
+              "x-loremax-media": {
+                "version": 1,
+                "mediaType": "image",
+                "role": "source",
+                "cardinality": "single",
+                "acceptedFormats": [
+                  "png",
+                  "jpg",
+                  "jpeg",
+                  "webp"
+                ],
+                "constraints": {
+                  "maxFileSizeMb": 50
+                }
+              }
+            },
+            "edit_mask": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://[^\\s/?#]+(?:/[^\\s#]*)?$(?![\\s\\S])",
+              "maxLength": 2048,
+              "title": "Mask",
+              "description": "Finalized organization-owned image URL. Upload with request_upload_url and finalize_upload, or import with upload_from_url. Formats: png. Limits: {\"maxFileSizeMb\":50}. Optional PNG mask for the first image of source, with matching dimensions. Use opaque white for the selected region and transparency elsewhere. Upload the prepared source and mask together; the server does not draw or resize masks. Supply it only together with at least one source image.",
+              "x-loremax-media": {
+                "version": 1,
+                "mediaType": "image",
+                "role": "mask",
+                "cardinality": "single",
+                "acceptedFormats": [
+                  "png"
+                ],
+                "constraints": {
+                  "maxFileSizeMb": 50
+                },
+                "pairedWith": {
+                  "key": "source",
+                  "index": 0
+                }
+              }
+            },
+            "on_behalf_of": {
+              "type": "string",
+              "description": "Optional display-only actor label; never an authorization identity. Trimmed, at most 128 characters. Letters, digits, spaces and . _ : @ - only; no credentials."
+            },
+            "schema_revision": {
+              "type": "string",
+              "enum": [
+                "7f1c0e5b7a3d4c2e9b8a6f5d4c3b2a1908f7e6d5c4b3a29180706f5e4d3c2b1a"
+              ],
+              "description": "Copy from tools/list. Refresh tools/list if this revision is rejected."
+            },
+            "api_key": {
+              "type": "string",
+              "description": "Optional organization API key (lmx_prod_ + 32 alphanumeric characters). Omit it to use the connection credentials."
+            }
+          },
+          "required": [
+            "schema_revision",
+            "text",
+            "source"
+          ],
+          "additionalProperties": false,
+          "x-loremax-conditions": {
+            "version": 1,
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "edit_mask"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "source"
+                  ]
+                }
+              }
+            ]
+          },
+          "x-loremax-limits": {
+            "version": 1,
+            "maxImagePositions": 50,
+            "maxMediaPositions": 100,
+            "maxTotalBytes": 209715200
+          }
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        },
+        "_meta": {
+          "loremax.ai/workflow": {
+            "version": 1,
+            "workflowId": 7,
+            "visualId": "masked-edit",
+            "title": "masked_edit",
+            "category": "Image",
+            "contentType": "image",
+            "pipeline": false
+          }
+        }
+      },
+      {
+        "name": "styled_portrait",
+        "title": "Styled portrait",
+        "description": "Generate image with \"Styled portrait\". A style controller picks the detail rules. Each call starts one paid generation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "style": {
+              "type": "string",
+              "enum": [
+                "photo",
+                "sketch"
+              ],
+              "default": "photo",
+              "title": "Style",
+              "description": "Options: \"photo\" = Photo; \"sketch\" = Sketch"
+            },
+            "detail": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "title": "Detail",
+              "description": "When style is \"photo\": integer 1..10; when style is \"sketch\": hidden, omit it. Exact rules: x-loremax-conditions."
+            },
+            "references": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^\\s/?#]+(?:/[^\\s#]*)?$(?![\\s\\S])",
+                "maxLength": 2048
+              },
+              "minItems": 0,
+              "maxItems": 4,
+              "title": "References",
+              "description": "Finalized organization-owned image URL array. Formats: png, jpg, jpeg, webp. Limits: {\"maxFileSizeMb\":20,\"minWidth\":256}. Repeated URLs count as separate input positions.",
+              "x-loremax-media": {
+                "version": 1,
+                "mediaType": "image",
+                "role": "source",
+                "cardinality": "array",
+                "acceptedFormats": [
+                  "png",
+                  "jpg",
+                  "jpeg",
+                  "webp"
+                ],
+                "constraints": {
+                  "maxFileSizeMb": 20,
+                  "minWidth": 256
+                }
+              }
+            },
+            "on_behalf_of": {
+              "type": "string"
+            },
+            "schema_revision": {
+              "type": "string",
+              "enum": [
+                "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9"
+              ],
+              "description": "Copy from tools/list. Refresh tools/list if this revision is rejected."
+            },
+            "api_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_revision"
+          ],
+          "additionalProperties": false,
+          "x-loremax-conditions": {
+            "version": 1,
+            "allOf": [
+              {
+                "if": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "style": {
+                          "enum": [
+                            "photo"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "style"
+                      ]
+                    },
+                    {
+                      "not": {
+                        "required": [
+                          "style"
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "detail": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 10
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "style": {
+                      "enum": [
+                        "sketch"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "style"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "detail": false
+                  }
+                }
+              }
+            ]
+          },
+          "x-loremax-limits": {
+            "version": 1,
+            "maxImagePositions": 50,
+            "maxMediaPositions": 100,
+            "maxTotalBytes": 209715200
+          }
+        },
+        "_meta": {
+          "loremax.ai/workflow": {
+            "version": 1,
+            "workflowId": 12,
+            "visualId": "styled-portrait",
+            "title": "Styled portrait",
+            "category": "Portraits",
+            "contentType": "image",
+            "pipeline": true
+          }
+        }
+      },
+      {
+        "name": "get_balance",
+        "description": "Token balance of the organization.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "api_key": {
+              "type": "string"
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      {
+        "name": "check_generation",
+        "description": "Status of a generation by generationId.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "generationId": {
+              "type": "string"
+            },
+            "api_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "generationId"
+          ]
+        },
+        "annotations": {
+          "idempotentHint": true
+        }
+      },
+      {
+        "name": "request_upload_url",
+        "description": "Presigned upload URL for one local file.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string"
+            },
+            "mime": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size_hint": {
+              "type": "integer"
+            },
+            "api_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "filename",
+            "mime"
+          ]
+        }
+      },
+      {
+        "name": "finalize_upload",
+        "description": "Finalize an uploaded asset and get its URL.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "asset_id": {
+              "type": "string"
+            },
+            "api_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "asset_id"
+          ]
+        }
+      },
+      {
+        "name": "upload_from_url",
+        "description": "Import a public URL as an organization asset.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "api_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        }
+      }
+    ]
+  }
+}

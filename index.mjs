@@ -54,6 +54,13 @@ const PROFILE_HINT =
 /** Profile errors raised before any debit: the call was refused, nothing was charged. */
 const PREFLIGHT_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "INVALID_WORKFLOW_INPUT", "MEDIA_INPUT_INVALID", "WORKFLOW_UNAVAILABLE", "PROFILE_ORGANIZATION_MISMATCH"]);
 const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
+/** A profile's tools/list is reread after this long, or at once after one of the refresh codes. */
+const CATALOG_TTL_MS = 10 * 60_000;
+const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
+/** Profile tools that are never generations, whatever their schema says. */
+const PROFILE_SERVICE_TOOLS = new Set(["get_balance", "check_generation", "request_upload_url", "finalize_upload", "upload_from_url"]);
+/** Arguments the plugin fills in itself: the agent never sees them in a tool's schema. */
+const INJECTED_ARGS = ["schema_revision", "api_key", "on_behalf_of"];
 
 const EXT_BY_MIME = {
   "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg",
@@ -314,6 +321,136 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   }
 
   return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, profilePath, usdPerToken, defaultWaitS, restJson, rpc, nextId, toolResult, toolCall, mcpCall, check };
+}
+
+const isObj = (v) => v != null && typeof v === "object" && !Array.isArray(v);
+
+/**
+ * One profile tools/list entry → a generation tool as the dispatcher uses it, or
+ * null for a service tool or a nameless entry; throws for a generation tool it
+ * cannot use. A generation tool is one whose schema takes `schema_revision`
+ * (`_meta` is only for identity); `warn(key, message)` logs once per key.
+ */
+function profileTool(t, warn) {
+  const name = isObj(t) && typeof t.name === "string" ? t.name.trim() : "";
+  const schema = isObj(t) ? t.inputSchema : null;
+  const props = isObj(schema) && isObj(schema.properties) ? schema.properties : null;
+  if (!name || !props || !Object.hasOwn(props, "schema_revision") || PROFILE_SERVICE_TOOLS.has(name)) return null;
+  const revision = props.schema_revision?.enum?.[0];
+  // a generation tool that cannot be called: the caller skips it, it is no service tool either
+  if (typeof revision !== "string" || !revision) throw new Error("no schema_revision value");
+  const agentSchema = structuredClone(schema);
+  for (const k of INJECTED_ARGS) delete agentSchema.properties[k];
+  if (Array.isArray(agentSchema.required)) agentSchema.required = agentSchema.required.filter((k) => !INJECTED_ARGS.includes(k));
+  const fileArgs = [];
+  for (const [arg, p] of Object.entries(agentSchema.properties)) {
+    const m = isObj(p) ? p["x-loremax-media"] : null;
+    if (!isObj(m)) continue;
+    // an unknown version keeps the argument a plain URL string: its semantics are not version 1's
+    if (m.version !== 1 || typeof m.mediaType !== "string") {
+      warn(`media:${m.version}`, `loremax profile tool ${name}: x-loremax-media version ${JSON.stringify(m.version)} is unknown — ${arg} is passed as a plain URL`);
+      continue;
+    }
+    fileArgs.push({
+      name: arg,
+      mediaType: m.mediaType,
+      role: m.role ?? "source",
+      cardinality: m.cardinality ?? (p.type === "array" ? "array" : "single"),
+      acceptedFormats: Array.isArray(m.acceptedFormats) ? m.acceptedFormats : [],
+      constraints: isObj(m.constraints) ? m.constraints : {},
+      ...(isObj(m.pairedWith) ? { pairedWith: m.pairedWith } : {}),
+    });
+  }
+  const w = isObj(t._meta) ? t._meta["loremax.ai/workflow"] : null;
+  let identity;
+  if (isObj(w)) {
+    const { workflowId, visualId, title, category, contentType, pipeline } = w;
+    identity = { workflowId, visualId, title, category, contentType, pipeline };
+  } else {
+    identity = { title: t.title ?? name };
+    warn(`identity:${name}`, `loremax profile tool ${name} has no _meta loremax.ai/workflow — identified by its title only`);
+  }
+  return {
+    name,
+    title: typeof t.title === "string" && t.title ? t.title : identity.title ?? name,
+    description: typeof t.description === "string" ? t.description : "",
+    revision,
+    agentSchema,
+    fileArgs,
+    limits: isObj(schema["x-loremax-limits"]) ? schema["x-loremax-limits"] : null,
+    identity,
+  };
+}
+
+/**
+ * The profile's catalog: its tools/list, cached for CATALOG_TTL_MS and reread on
+ * `force` or after a refresh code (`refreshAfter`). LoreMax never sends
+ * list-changed notifications, so these are the only ways a change shows up.
+ * get() → { tools: Map name → generation tool, service: [names], fetchedAt }.
+ */
+export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
+  let cached = null;
+  let loading = null;
+  const warned = new Set();
+  const warn = (k, msg) => {
+    if (warned.has(k)) return;
+    warned.add(k);
+    log?.warn?.(msg);
+  };
+
+  async function load({ deadline } = {}) {
+    const path = lmx.profilePath();
+    const entries = [];
+    let cursor;
+    // a profile holds at most 10 workflows; pages are followed only in case the server ever paginates
+    for (let page = 0; page < 10; page++) {
+      const msg = await lmx.rpc(path, { jsonrpc: "2.0", id: lmx.nextId(), method: "tools/list", ...(cursor ? { params: { cursor } } : {}) }, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
+      if (msg?.error) throw new Error(`loremax ${path} tools/list: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
+      const list = msg?.result?.tools;
+      if (Array.isArray(list)) entries.push(...list);
+      cursor = typeof msg?.result?.nextCursor === "string" && msg.result.nextCursor ? msg.result.nextCursor : null;
+      if (!cursor) break;
+    }
+    const tools = new Map();
+    const service = [];
+    for (const t of entries) {
+      let g = null;
+      try {
+        g = profileTool(t, warn);
+      } catch (e) {
+        warn(`bad:${t?.name}`, `loremax profile tool ${String(t?.name ?? "?").slice(0, 100)} is unreadable — skipped (${e?.message ?? e})`);
+        continue;
+      }
+      if (g) {
+        if (!tools.has(g.name)) tools.set(g.name, g);
+      } else if (isObj(t) && typeof t.name === "string" && t.name.trim()) service.push(t.name.trim());
+    }
+    return { tools, service, fetchedAt: now() };
+  }
+
+  /** The catalog, reread when stale or forced; concurrent callers share one tools/list. */
+  async function get({ force = false, deadline } = {}) {
+    if (!force && cached && now() - cached.fetchedAt < CATALOG_TTL_MS) return cached;
+    if (!loading) {
+      loading = load({ deadline }).then(
+        (c) => ((cached = c), (loading = null), c),
+        (e) => {
+          loading = null;
+          throw e;
+        },
+      );
+    }
+    return loading;
+  }
+
+  /** Marks the cache stale when `err` says the catalog changed; true if it did. */
+  function refreshAfter(err) {
+    if (!CATALOG_REFRESH_CODES.has(err?.code)) return false;
+    if (cached) cached = { ...cached, fetchedAt: -Infinity };
+    return true;
+  }
+
+  return { get, refreshAfter };
 }
 
 /** What the agent should do with a finished generation's outputs. */
