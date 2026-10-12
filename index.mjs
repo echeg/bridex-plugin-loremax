@@ -39,6 +39,8 @@ const POLL_MS = 3_000;
 const DEFAULT_WAIT_S = 45;
 const MAX_WAIT_S = 50;
 const FINISH_RESERVE_MS = 10_000;
+/** A synchronous reply without outputs is looked up (Text workflows): each read gets this long. */
+const LOOKUP_TIMEOUT_MS = 10_000;
 /** The reboot-proof watcher's pass over pending jobs, and when it gives a generation up. */
 const WATCH_MS = 15_000;
 const GIVE_UP_MS = 6 * 3_600_000;
@@ -49,6 +51,10 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 const EXT_BY_MIME = {
   "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif", "image/svg+xml": "svg",
   "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+  "video/x-matroska": "mkv", "video/mp2t": "ts", "video/x-m4v": "m4v",
+  "audio/mpeg": "mp3", "audio/wav": "wav", "audio/mp4": "m4a", "audio/ogg": "ogg", "audio/flac": "flac", "audio/aac": "aac",
+  "model/gltf-binary": "glb", "model/gltf+json": "gltf", "model/obj": "obj", "model/stl": "stl",
+  "model/vnd.usdz+zip": "usdz", "model/fbx": "fbx",
 };
 const MIME_BY_EXT = Object.fromEntries(Object.entries(EXT_BY_MIME).map(([m, e]) => [e, m]));
 MIME_BY_EXT.jpeg = "image/jpeg";
@@ -127,46 +133,49 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   const outOfFunds = (detail) =>
     ctx.billing?.outOfFunds?.({ provider: "LoreMax", what: "image and video generation (loremax plugin)", detail: String(detail).slice(0, 400) });
 
-  /** `deadline` (epoch ms, optional) ends the request and any Retry-After wait by then. */
-  async function restJson(p, init = {}, { timeoutMs = 60_000, deadline } = {}) {
-    const url = `${baseUrl()}${p}`;
+  /**
+   * One request with a single Retry-After retry on 429 → { res, body }. `deadline`
+   * (epoch ms, optional) ends the request and any Retry-After wait by then.
+   */
+  async function send(url, init, label, { timeoutMs = 60_000, deadline } = {}) {
     for (let attempt = 0; ; attempt++) {
       const left = deadline == null ? Infinity : deadline - now();
-      if (left <= 0) throw deadlineError(p);
+      if (left <= 0) throw deadlineError(label);
       const ms = Math.min(timeoutMs, left);
       let res;
       let body;
       try {
-        res = await fetch(url, {
-          ...init,
-          headers: { "X-API-Key": key(), ...(init.headers ?? {}) },
-          signal: AbortSignal.timeout(ms),
-        });
+        res = await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
         body = await res.text();
       } catch (e) {
         // cut short by the deadline, not by the request's own timeout
-        if (ms < timeoutMs && e?.name === "TimeoutError") throw deadlineError(p);
+        if (ms < timeoutMs && e?.name === "TimeoutError") throw deadlineError(label);
         throw e;
       }
       if (res.status === 429) {
         if (attempt === 0) {
           const wait = retryAfterMs(res.headers.get("retry-after"));
           // a wait that does not fit before the deadline is not slept
-          if (deadline != null && now() + wait > deadline) throw deadlineError(p);
+          if (deadline != null && now() + wait > deadline) throw deadlineError(label);
           await sleep(wait);
           continue;
         }
-        throw httpError(`loremax 429 ${p}: rate limited (LoreMax allows 60/min, 1000/h) — ${body.slice(0, 200)}`, 429, body);
+        throw httpError(`loremax 429 ${label}: rate limited (LoreMax allows 60/min, 1000/h) — ${body.slice(0, 200)}`, 429, body);
       }
-      if (!res.ok) {
-        if (res.status === 402 || /insufficient tokens/i.test(body)) outOfFunds(body);
-        throw httpError(`loremax ${res.status} ${p}: ${body.slice(0, 400)}`, res.status, body);
-      }
-      try {
-        return JSON.parse(body);
-      } catch {
-        throw httpError(`loremax returned non-JSON from ${p}: ${body.slice(0, 200)}`, res.status, body);
-      }
+      return { res, body };
+    }
+  }
+
+  async function restJson(p, init = {}, opts = {}) {
+    const { res, body } = await send(`${baseUrl()}${p}`, { ...init, headers: { "X-API-Key": key(), ...(init.headers ?? {}) } }, p, opts);
+    if (!res.ok) {
+      if (res.status === 402 || /insufficient tokens/i.test(body)) outOfFunds(body);
+      throw httpError(`loremax ${res.status} ${p}: ${body.slice(0, 400)}`, res.status, body);
+    }
+    try {
+      return JSON.parse(body);
+    } catch {
+      throw httpError(`loremax returned non-JSON from ${p}: ${body.slice(0, 200)}`, res.status, body);
     }
   }
 
@@ -174,10 +183,12 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   /**
    * One stateless tools/call (no initialize needed) → the tool's data. LoreMax
    * puts the data itself as JSON in the text content; a failed tool sets
-   * `isError` with `{"error": "…"}` there.
+   * `isError` with `{"error": "…", "errorCode"?, "details"?}` there — code and
+   * details ride on the thrown error as `code` / `details`.
    */
-  async function mcpCall(tool, args = {}, timeoutMs = 60_000) {
-    const res = await fetch(`${baseUrl()}/api/mcp`, {
+  async function mcpCall(tool, args = {}, opts = {}) {
+    const label = `/api/mcp ${tool}`;
+    const { res, body } = await send(`${baseUrl()}/api/mcp`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${key()}`,
@@ -186,18 +197,16 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
         Accept: "application/json, text/event-stream",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: tool, arguments: args } }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const body = await res.text();
+    }, label, opts);
     if (!res.ok) {
       if (res.status === 402 || /insufficient tokens/i.test(body)) outOfFunds(body);
-      throw httpError(`loremax ${res.status} /api/mcp ${tool}: ${body.slice(0, 400)}`, res.status, body);
+      throw httpError(`loremax ${res.status} ${label}: ${body.slice(0, 400)}`, res.status, body);
     }
     let msg;
     try {
       msg = JSON.parse(body);
     } catch {
-      throw httpError(`loremax returned non-JSON from /api/mcp ${tool}: ${body.slice(0, 200)}`, res.status, body);
+      throw httpError(`loremax returned non-JSON from ${label}: ${body.slice(0, 200)}`, res.status, body);
     }
     if (msg.error) throw new Error(`loremax ${tool}: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
     const t = (msg.result?.content ?? []).find((c) => c?.type === "text")?.text ?? "";
@@ -209,16 +218,19 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     }
     if (msg.result?.isError) {
       const errText = typeof out?.error === "string" ? out.error : JSON.stringify(out?.error ?? out ?? "unknown error");
-      if (/insufficient tokens/i.test(errText)) outOfFunds(errText);
-      throw new Error(`loremax ${tool}: ${errText}`.slice(0, 500));
+      if (/insufficient tokens/i.test(errText) || out?.errorCode === "INSUFFICIENT_TOKENS") outOfFunds(errText);
+      throw Object.assign(new Error(`loremax ${tool}: ${errText}`.slice(0, 500)), {
+        ...(typeof out?.errorCode === "string" ? { code: out.errorCode } : {}),
+        ...(out?.details != null ? { details: out.details } : {}),
+      });
     }
     return out;
   }
 
   /** One /check of a generation; LoreMax answers a failed one with HTTP 500 and `status: "failed"` in the body. */
-  async function check(generationId, { deadline } = {}) {
+  async function check(generationId, { deadline, timeoutMs = 30_000 } = {}) {
     try {
-      return await restJson(`/api/v2/generations/${encodeURIComponent(generationId)}/check`, { method: "POST" }, { timeoutMs: 30_000, deadline });
+      return await restJson(`/api/v2/generations/${encodeURIComponent(generationId)}/check`, { method: "POST" }, { timeoutMs, deadline });
     } catch (e) {
       let body;
       try {
@@ -268,6 +280,13 @@ function fromJobLabel(label) {
   return m ? { note: m[1] ?? "", tokensCost: Number(m[2]) } : { note: label ?? "", tokensCost: 0 };
 }
 
+/** A Text workflow's output: `textContent` on a /check result or a v2 reply, `text_content` on an MCP one. */
+function textOf(r) {
+  const t = r?.textContent ?? r?.text_content;
+  return typeof t === "string" && t.trim() ? t : "";
+}
+const urlsOf = (r) => [r?.originalUrls, r?.previewUrls, r?.externalUrls].find((u) => u?.length) ?? [];
+
 /** `flux-portrait`, `12`, `My Workflow!` → a file-name-safe slug. */
 const slugOf = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "loremax";
 
@@ -294,16 +313,18 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
   }
 
   /**
-   * Download outputs into artifacts/<task|loremax>/ with provenance. Returns the
-   * saved relative paths and the URLs left on the CDN (download failed or over
-   * the cap), so the agent still learns where those outputs are.
+   * Download outputs (and write a Text workflow's text as .md) into
+   * artifacts/<task|loremax>/ with provenance. Returns the saved relative paths
+   * and the URLs left on the CDN (download failed or over the cap), so the agent
+   * still learns where those outputs are.
    */
   async function saveOutputs(call, workflowSlug, generationId, result, note, generation) {
     // a workflow can return its media only as externalUrls (outputs.external): LoreMax counts that as a success too
-    const urls = [result?.originalUrls, result?.previewUrls, result?.externalUrls].find((u) => u?.length) ?? [];
+    const urls = urlsOf(result);
+    const text = textOf(result);
     const rels = [];
     const skipped = [];
-    if (!urls.length) return { artifacts: rels, skipped };
+    if (!urls.length && !text) return { artifacts: rels, skipped };
     const folder = call.taskId ?? "loremax";
     const id = slugOf(generationId);
     const skip = (url, why) => {
@@ -312,6 +333,50 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
     };
     const overCap = `exceeds the ${Math.round(downloadCap / 1e6)}MB cap, left on the CDN`;
     const artRoot = ctx.paths.workspaceArtifacts(call.workspace);
+
+    /** One output written to artifacts/<folder>/<name> with provenance; `fail(why)` hears a local save error. */
+    function store(name, buf, fail) {
+      const rel = path.posix.join(folder, name);
+      const abs = path.join(artRoot, rel);
+      const tmp = `${abs}.${process.pid}-${Date.now()}.part`;
+      // a full disk or a read-only folder must not lose a paid result: that output
+      // is reported, and the spend is still recorded by finish
+      try {
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        // the name is predictable: a symlinked folder or file planted there must not
+        // redirect the write outside the workspace — check the folder, then write a
+        // fresh temp file and rename it over whatever entry sits at the name
+        const realRoot = fs.realpathSync(artRoot);
+        const realDir = fs.realpathSync(path.dirname(abs));
+        if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
+          fail(`not saved: artifacts/${folder} leads outside the workspace`);
+          return;
+        }
+        fs.writeFileSync(tmp, buf, { flag: "wx" });
+        fs.renameSync(tmp, abs);
+      } catch (e) {
+        try {
+          fs.rmSync(tmp, { force: true });
+        } catch {}
+        fail(`not saved (${e?.code ?? e?.message ?? e})`);
+        return;
+      }
+      // the file is on disk: a provenance hiccup only costs the sidecar
+      try {
+        ctx.artifacts.annotate(call.workspace, rel, {
+          agent: call.agent,
+          taskId: call.taskId,
+          description: `LoreMax ${generation?.workflow ?? workflowSlug} · generation ${generationId}${note ? ` · ${note}` : ""}`.slice(0, 300),
+          action: "generated",
+          // how it was made: the studio's Source card reads provider, workflow and params.image_urls
+          generation,
+        });
+      } catch (e) {
+        ctx.log.warn(`loremax provenance for ${rel}: ${e?.message ?? e}`);
+      }
+      rels.push(rel);
+    }
+
     for (const [i, url] of urls.entries()) {
       let res;
       let buf;
@@ -344,55 +409,42 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
         urlExt = (new URL(url).pathname.match(/\.([a-z0-9]{1,4})$/i)?.[1] ?? "").toLowerCase();
       } catch {}
       const ext = EXT_BY_MIME[declared] ?? EXT_BY_MIME[served] ?? (urlExt || "bin");
-      const name = `${workflowSlug}-${id}${urls.length > 1 ? `-${i + 1}` : ""}.${ext}`;
-      const rel = path.posix.join(folder, name);
-      const abs = path.join(artRoot, rel);
-      const tmp = `${abs}.${process.pid}-${Date.now()}.part`;
-      // a full disk or a read-only folder must not lose a paid result: that output
-      // stays on the CDN, and the spend is still recorded by finish
-      try {
-        fs.mkdirSync(path.dirname(abs), { recursive: true });
-        // the name is predictable: a symlinked folder or file planted there must not
-        // redirect the write outside the workspace — check the folder, then write a
-        // fresh temp file and rename it over whatever entry sits at the name
-        const realRoot = fs.realpathSync(artRoot);
-        const realDir = fs.realpathSync(path.dirname(abs));
-        if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) {
-          skip(url, `not saved: artifacts/${folder} leads outside the workspace, left on the CDN`);
-          continue;
-        }
-        fs.writeFileSync(tmp, buf, { flag: "wx" });
-        fs.renameSync(tmp, abs);
-      } catch (e) {
-        try {
-          fs.rmSync(tmp, { force: true });
-        } catch {}
-        skip(url, `not saved (${e?.code ?? e?.message ?? e}), left on the CDN`);
-        continue;
-      }
-      // the file is on disk: a provenance hiccup only costs the sidecar
-      try {
-        ctx.artifacts.annotate(call.workspace, rel, {
-          agent: call.agent,
-          taskId: call.taskId,
-          description: `LoreMax ${generation?.workflow ?? workflowSlug} · generation ${generationId}${note ? ` · ${note}` : ""}`.slice(0, 300),
-          action: "generated",
-          // how it was made: the studio's Source card reads provider, workflow and params.image_urls
-          generation,
-        });
-      } catch (e) {
-        ctx.log.warn(`loremax provenance for ${rel}: ${e?.message ?? e}`);
-      }
-      rels.push(rel);
+      store(`${workflowSlug}-${id}${urls.length > 1 ? `-${i + 1}` : ""}.${ext}`, buf, (why) => skip(url, `${why}, left on the CDN`));
     }
+    // the text came in the reply: nothing stays on a CDN if it cannot be written
+    if (text) store(`${workflowSlug}-${id}.md`, Buffer.from(text, "utf8"), (why) => ctx.log.warn(`loremax text output ${why}`));
     if (rels.length) ctx.artifacts.mirror(call.workspace, rels);
     return { artifacts: rels, skipped };
   }
 
   /**
+   * A synchronous reply with neither URLs nor text (a Text workflow on the v2
+   * execute reply): one REST /check for what it made, and only when that body has
+   * no result at all, one MCP check_generation. Both are quick reads, kept short:
+   * this can run inside a tool call. Never throws: the spend is still recorded.
+   */
+  async function lookupOutputs(generationId) {
+    try {
+      const c = await lmx.check(generationId, { timeoutMs: LOOKUP_TIMEOUT_MS });
+      if (c?.result) return c.result;
+    } catch (e) {
+      ctx.log.warn(`loremax check ${generationId} for its outputs: ${e?.message ?? e}`);
+    }
+    try {
+      const g = await lmx.mcpCall("check_generation", { generationId: String(generationId) }, { timeoutMs: LOOKUP_TIMEOUT_MS });
+      const text = textOf(g);
+      return text ? { textContent: text } : null;
+    } catch (e) {
+      ctx.log.warn(`loremax check_generation ${generationId}: ${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  /**
    * A completed generation → files saved, spend recorded, job settled, tool reply.
    * job: { generationId, workflow, inputs?, references?, tokensCost?, trackedId?, note? }
-   * check: LoreMax's /check reply with `result`.
+   * check: LoreMax's /check reply with `result`, or `{ result, fromReply: true }`
+   * for the outputs of a synchronous execute reply.
    */
   async function finish(call, job, check) {
     const workflow = String(job.workflow ?? "");
@@ -406,7 +458,9 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       externalId: String(job.generationId),
       ...(costUsd ? { costUsd } : {}),
     };
-    const { artifacts, skipped } = await saveOutputs(call, slugOf(workflow), job.generationId, check?.result ?? {}, job.note ?? "", generation);
+    let result = check?.result ?? {};
+    if (check?.fromReply && !urlsOf(result).length && !textOf(result)) result = (await lookupOutputs(job.generationId)) ?? result;
+    const { artifacts, skipped } = await saveOutputs(call, slugOf(workflow), job.generationId, result, job.note ?? "", generation);
     ctx.usage.record({
       workspace: call.workspace,
       agent: call.agent,
@@ -416,6 +470,8 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       units: tokensCost,
       unit: "tk",
       taskId: call.taskId,
+      // the host counts one spend per ref: a finish repeated after a crash is not billed twice
+      ref: String(job.generationId),
     });
     const leftOnCdn = skipped.length ? { left_on_cdn: skipped } : {};
     if (job.trackedId && ctx.jobs)
@@ -576,7 +632,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     // instead of spending a /check round trip on it
     const result = sub.async === true
       ? null
-      : { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], externalUrls: sub.externalUrls ?? [], contentTypes: [] };
+      : { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], externalUrls: sub.externalUrls ?? [], contentTypes: [], textContent: textOf(sub) };
     return { job, result };
   }
 
@@ -651,7 +707,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     inFlight.add(generationId);
     generations.set(generationId, job);
     try {
-      const done = await outputs.finish(ph.call, { ...job, trackedId: null }, { result });
+      const done = await outputs.finish(ph.call, { ...job, trackedId: null }, { result, fromReply: true });
       settleSubmit(ph, "succeeded", { generationId });
       wakeSubmit(ph, `${ph.what} — generation ${generationId} finished: ${savedList(done)} — check them, then continue where you left off${ph.task}.`);
     } catch (e) {
@@ -766,7 +822,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           }, null, 1));
         }
         try {
-          const done = await outputs.finish(call, { ...job, trackedId: null }, { result });
+          const done = await outputs.finish(call, { ...job, trackedId: null }, { result, fromReply: true });
           if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
           return text(JSON.stringify(done, null, 1));
         } catch (e) {
@@ -971,7 +1027,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   ctx.registerCheck?.(async () => {
     if (!lmx.hasKey()) return { ok: false, message: "no key: LOREMAX_API_KEY is not set" };
     try {
-      const b = await lmx.mcpCall("get_balance", {}, 15_000);
+      const b = await lmx.mcpCall("get_balance", {}, { timeoutMs: 15_000 });
       const remaining = Number(b?.remaining);
       return remaining > 0
         ? { ok: true, message: `key works · ${remaining} tk left` }
@@ -987,7 +1043,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     if (!lmx.hasKey()) return [];
     if (now() - balanceCache.at < BALANCE_TTL_MS) return balanceCache.tiles;
     try {
-      const b = await lmx.mcpCall("get_balance", {}, 2_500);
+      const b = await lmx.mcpCall("get_balance", {}, { timeoutMs: 2_500 });
       const remaining = Number(b?.remaining);
       if (!Number.isFinite(remaining)) return [];
       const limit = Number(b?.limit);

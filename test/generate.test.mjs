@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import activate from "../index.mjs";
-import { fakeCtx, mockFetch, jsonResponse, fakeSleep, eventually, generationRows } from "./helpers.mjs";
+import { fakeCtx, mockFetch, jsonResponse, mcpResult, fakeSleep, eventually, generationRows } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const CDN = "https://cdn.lm.test";
@@ -90,6 +90,7 @@ test("JSON path: execute, poll until completed, save, annotate, usage, settle", 
   assert.equal(s.rec.annotate[0].meta.description, "LoreMax flux-portrait · generation 501 · hero");
   assert.equal(s.rec.usage[0].units, 12);
   assert.equal(s.rec.usage[0].unit, "tk");
+  assert.equal(s.rec.usage[0].ref, "501");
 
   assert.equal(s.gens().length, 1);
   const j = s.gens()[0];
@@ -240,6 +241,7 @@ test("a workflow that finishes right away: outputs from the execute reply, no /c
   assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
   assert.equal(s.gens().length, 0);
   assert.equal(s.rec.usage[0].units, 5);
+  assert.equal(s.rec.usage[0].ref, "777");
 });
 
 test("a synchronous run ('success', only externalUrls): saved from the reply, never polled", async () => {
@@ -254,6 +256,71 @@ test("a synchronous run ('success', only externalUrls): saved from the reply, ne
   assert.deepEqual(r.artifacts, ["task-9/flux-portrait-778.png"]);
   assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
   assert.equal(s.gens().length, 0);
+});
+
+test("Text workflow: a sync reply carrying the text is saved as .md, no /check and no MCP call", async () => {
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 780, status: "completed", tokensCost: 2, textContent: "A short tale." }, 202)],
+  ]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.run({ workflow_id: "story", inputs: { prompt: "p" } });
+  assert.deepEqual(r.artifacts, ["task-9/story-780.md"]);
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/story-780.md"), "utf8"), "A short tale.");
+  assert.equal(f.calls.length, 1);
+  assert.equal(s.rec.usage.length, 1);
+});
+
+test("Text workflow: a sync reply without URLs reads the text from one REST /check", async () => {
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 781, status: "completed", tokensCost: 3 }, 202)],
+    ["POST", "/api/v2/generations/781/check", () => ({ generationId: 781, status: "completed", completed: true, result: { previewUrls: [], originalUrls: [], externalUrls: [], contentTypes: [], textContent: "Once upon a time." } })],
+  ]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.run({ workflow_id: "story", inputs: { prompt: "p" } });
+  assert.equal(r.status, "completed");
+  assert.deepEqual(r.artifacts, ["task-9/story-781.md"]);
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/story-781.md"), "utf8"), "Once upon a time.");
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/check")).length, 1);
+  assert.equal(f.calls.some((c) => c.url.endsWith("/api/mcp")), false);
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.usage[0].ref, "781");
+});
+
+test("Text workflow: a /check without result (an older LoreMax) falls back to one check_generation", async () => {
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 782, status: "completed", tokensCost: 3 }, 202)],
+    // the deployed LoreMax may still refuse /check for a synchronous row
+    ["POST", "/api/v2/generations/782/check", () => jsonResponse({ error: "not an async generation" }, 400)],
+    ["POST", "/api/mcp", (req) => mcpResult({ generationId: 782, status: "completed", content_type: "text", text_content: "Plain words." }, req.json.id)],
+  ]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.run({ workflow_id: "story", inputs: { prompt: "p" } });
+  assert.deepEqual(r.artifacts, ["task-9/story-782.md"]);
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/story-782.md"), "utf8"), "Plain words.");
+  const mcp = f.calls.filter((c) => c.url.endsWith("/api/mcp"));
+  assert.equal(mcp.length, 1);
+  assert.deepEqual(mcp[0].json.params, { name: "check_generation", arguments: { generationId: "782" } });
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.usage[0].units, 3);
+});
+
+test("a sync reply with really nothing to save: one /check, one check_generation, the unchanged no-files hint", async () => {
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 783, status: "completed", tokensCost: 1 }, 202)],
+    ["POST", "/api/v2/generations/783/check", () => ({ generationId: 783, status: "completed", completed: true })],
+    ["POST", "/api/mcp", (req) => mcpResult({ generationId: 783, status: "completed" }, req.json.id)],
+  ]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.run({ workflow_id: "w", inputs: {} });
+  assert.deepEqual(r.artifacts, []);
+  assert.match(r.hint, /no files/);
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/check")).length, 1);
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/api/mcp")).length, 1);
+  assert.equal(s.rec.usage.length, 1);
 });
 
 test("execute with no reply (timeout / reset): says the generation may have been charged", async () => {

@@ -116,6 +116,68 @@ test("mcpCall throws on a JSON-RPC error object", async () => {
   await assert.rejects(client().c.mcpCall("get_balanse"), /loremax get_balanse: Unknown tool: get_balanse/);
 });
 
+test("mcpCall: 429 with Retry-After → one retry through the sleep seam, then the tool data; twice → throws", async () => {
+  const slept = [];
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  const c = createClient(ctx, { sleep: async (ms) => slept.push(ms) });
+  let limited = 1;
+  const f = mockFetch([["POST", "/api/mcp", (req) => (limited-- > 0 ? jsonResponse({ error: "slow down" }, 429, { "retry-after": "2" }) : mcpResult({ remaining: 5 }, req.json.id))]]);
+  restore = f.restore;
+  assert.deepEqual(await c.mcpCall("get_balance"), { remaining: 5 });
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(slept, [2_000]);
+  limited = 2;
+  const err = await c.mcpCall("get_balance").catch((e) => e);
+  assert.match(err.message, /^loremax 429 \/api\/mcp get_balance: rate limited/);
+  assert.equal(err.status, 429);
+  assert.equal(f.calls.length, 4);
+});
+
+test("mcpCall: a Retry-After that does not fit before the deadline is not slept", async () => {
+  const clock = { t: 0 };
+  const slept = [];
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  const c = createClient(ctx, { now: () => clock.t, sleep: async (ms) => slept.push(ms) });
+  const f = mockFetch([["POST", "/api/mcp", () => jsonResponse({ error: "slow down" }, 429, { "retry-after": "30" })]]);
+  restore = f.restore;
+  const err = await c.mcpCall("get_balance", {}, { deadline: 10_000 }).catch((e) => e);
+  assert.equal(err.deadline, true);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(slept, []);
+});
+
+test("mcpCall: errorCode and details of an isError tool result ride on the thrown error", async () => {
+  const details = { issues: [{ path: ["prompt"], message: "Required" }] };
+  const f = mockFetch([["POST", "/api/mcp", () => jsonResponse({
+    jsonrpc: "2.0", id: 1,
+    result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: "Invalid workflow input", errorCode: "INVALID_WORKFLOW_INPUT", details }) }] },
+  })]]);
+  restore = f.restore;
+  const err = await client().c.mcpCall("flux_portrait", {}).catch((e) => e);
+  assert.match(err.message, /loremax flux_portrait: Invalid workflow input/);
+  assert.equal(err.code, "INVALID_WORKFLOW_INPUT");
+  assert.deepEqual(err.details, details);
+  // a plain error has neither
+  const f2 = mockFetch([["POST", "/api/mcp", () => mcpError("boom")]]);
+  restore = () => (f2.restore(), f.restore());
+  const plain = await client().c.mcpCall("x").catch((e) => e);
+  assert.equal(plain.code, undefined);
+  assert.equal(plain.details, undefined);
+});
+
+test("mcpCall: an INSUFFICIENT_TOKENS code opens the billing card even without the phrase", async () => {
+  const f = mockFetch([["POST", "/api/mcp", () => jsonResponse({
+    jsonrpc: "2.0", id: 1,
+    result: { isError: true, content: [{ type: "text", text: JSON.stringify({ error: "Balance too low", errorCode: "INSUFFICIENT_TOKENS", details: { requiredTokens: 40 } }) }] },
+  })]]);
+  restore = f.restore;
+  const { c, rec } = client();
+  const err = await c.mcpCall("flux_portrait", {}).catch((e) => e);
+  assert.equal(err.code, "INSUFFICIENT_TOKENS");
+  assert.deepEqual(err.details, { requiredTokens: 40 });
+  assert.equal(rec.outOfFunds.length, 1);
+});
+
 test("mcpCall: HTTP 401 surfaces the status", async () => {
   const f = mockFetch([["POST", "/api/mcp", () => new Response("Unauthorized", { status: 401 })]]);
   restore = f.restore;

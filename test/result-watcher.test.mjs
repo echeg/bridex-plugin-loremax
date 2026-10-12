@@ -130,6 +130,21 @@ test("watcher: finishes a pending job, settles it and wakes the agent with the a
   assert.equal(w.key, `loremax-job:${s.jobs[0].id}`);
   assert.match(w.prompt, /LoreMax generation 501 \(flux-portrait — hero\) finished: artifacts\/task-9\/flux-portrait-501\.png/);
   assert.equal(s.rec.usage[0].model, "flux-portrait");
+  // one spend per generation on the host, however often a crash makes it finish again
+  assert.equal(s.rec.usage[0].ref, "501");
+});
+
+test("watcher: a Text workflow's result.textContent from /check is saved as .md and woken", async () => {
+  const s = await setup();
+  s.track({ model: "story" });
+  const f = mockFetch([checkRoute(s, [{ status: "completed", result: { originalUrls: [], previewUrls: [], contentTypes: [], textContent: "The end." } }])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/story-501.md"), "utf8"), "The end.");
+  assert.match(s.rec.wakes[0].prompt, /finished: artifacts\/task-9\/story-501\.md/);
+  // a /check result is never looked up again
+  assert.equal(f.calls.length, 1);
+  assert.equal(s.rec.usage[0].ref, "501");
 });
 
 test("watcher after a restart: provenance and cost come from the job row's track() params", async () => {

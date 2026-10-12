@@ -221,19 +221,19 @@
 - [x] run `npm test` - must pass before task 2
 
 ### Task 2: Idempotent spend, 429 retry for MCP calls, more output types and Text workflows
-- [ ] pass `ref: String(job.generationId)` to `ctx.usage.record` in `finish` (`index.mjs:368-377`) so a repeated finish after a crash is counted once on the studio host
-- [ ] add the same deadline-aware single 429 retry to `mcpCall` as `restJson` has (`index.mjs:112-118`); keep `errorCode` and `details` from an `isError` text on the thrown error (`err.code`, `err.details`) instead of dropping them
-- [ ] extend `EXT_BY_MIME` / `MIME_BY_EXT` (`index.mjs:40-45`):
+- [x] pass `ref: String(job.generationId)` to `ctx.usage.record` in `finish` (`index.mjs:368-377`) so a repeated finish after a crash is counted once on the studio host
+- [x] add the same deadline-aware single 429 retry to `mcpCall` as `restJson` has (`index.mjs:112-118`); keep `errorCode` and `details` from an `isError` text on the thrown error (`err.code`, `err.details`) instead of dropping them
+- [x] extend `EXT_BY_MIME` / `MIME_BY_EXT` (`index.mjs:40-45`):
   - audio: `audio/mpeg` mp3, `audio/wav` wav, `audio/mp4` m4a, `audio/ogg` ogg, `audio/flac` flac, `audio/aac` aac;
   - video: `video/x-matroska` mkv, `video/mp2t` ts, `video/x-m4v` m4v;
   - 3D: `model/gltf-binary` glb, `model/gltf+json` gltf, `model/obj` obj, `model/stl` stl, `model/vnd.usdz+zip` usdz, `model/fbx` fbx.
-- [ ] Text outputs. Text that is already in a reply (`textContent` / `text_content`, from the execute reply or a REST check's `result.textContent`) is saved as `<slug>-<generationId>.md` in the task artifacts through the same provenance / annotate / mirror path. When `finish` is about to report a completed generation with no files and no text (a sync execute reply without URLs), call the REST `check` once (it now answers 200 for sync rows and carries `result.textContent`); only if that body has no `result` at all, fall back to one generic `/api/mcp` `check_generation {generationId}` and read `text_content`.
-- [ ] write tests:
+- [x] Text outputs. Text that is already in a reply (`textContent` / `text_content`, from the execute reply or a REST check's `result.textContent`) is saved as `<slug>-<generationId>.md` in the task artifacts through the same provenance / annotate / mirror path. When `finish` is about to report a completed generation with no files and no text (a sync execute reply without URLs), call the REST `check` once (it now answers 200 for sync rows and carries `result.textContent`); only if that body has no `result` at all, fall back to one generic `/api/mcp` `check_generation {generationId}` and read `text_content`.
+- [x] write tests:
   - usage `ref` is present in sync, async and watcher finishes (`test/save.test.mjs`, `test/result-watcher.test.mjs`);
   - `mcpCall` 429 retry and error code/details passthrough (`test/http.test.mjs`);
   - audio/glb/ts extension mapping (`test/save.test.mjs`);
   - text: a sync v2 execute reply without URLs leads to `check_generation`, saves the `.md` and records usage once; text from a REST check; text from a reply; the unchanged "no files" hint when there is really nothing (`test/generate.test.mjs`).
-- [ ] run `npm test` - must pass before task 3
+- [x] run `npm test` - must pass before task 3
 
 ### Task 3: `profile_url` config and mode selection
 - [ ] add `profile_url` to `plugin.yaml` `config_schema` (string, optional; full `https://…/api/mcp/s/<publicId>` URL or bare publicId) and a non-undefined default `""` in `cfg` (the acceptance test requires defaults for every key)

@@ -61,7 +61,7 @@ test("finish: two outputs named by contentTypes, provenance, mirror, usage, sett
 
   assert.deepEqual(s.rec.usage, [{
     workspace: "studio", agent: "illustrator", kind: "loremax", model: "Flux Portrait",
-    costUsd: 0.3, units: 30, unit: "tk", taskId: "task-7",
+    costUsd: 0.3, units: 30, unit: "tk", taskId: "task-7", ref: "gen-42",
   }]);
   assert.equal(s.jobs[0].status, "succeeded");
   assert.deepEqual(s.jobs[0].result, { workspace: "studio", artifacts: rels, tokensCost: 30 });
@@ -98,6 +98,40 @@ test("saveOutputs: falls back to previewUrls, then the URL path for the extensio
   const rels = await s.saveOutputs(CALL, "kling", "g1", { originalUrls: [], previewUrls: [`${CDN}/p/clip.mp4`] }, "", {});
   assert.deepEqual(rels, { artifacts: ["task-7/kling-g1.mp4"], skipped: [] });
   assert.equal(f.calls[0].url, `${CDN}/p/clip.mp4`);
+});
+
+test("saveOutputs: audio, 3D and transport-stream outputs get their own extensions, not .bin", async () => {
+  const f = mockFetch([
+    ["GET", `${CDN}/a`, () => file("A", "audio/mpeg")],
+    ["GET", `${CDN}/m`, () => file("M")],
+    ["GET", `${CDN}/v`, () => file("V", "video/mp2t; charset=binary")],
+    ["GET", `${CDN}/w`, () => file("W", "audio/wav")],
+    ["GET", `${CDN}/u`, () => file("U")],
+  ]);
+  restore = f.restore;
+  const s = setup();
+  const rels = await s.saveOutputs(CALL, "w", "g", {
+    originalUrls: [`${CDN}/a`, `${CDN}/m`, `${CDN}/v`, `${CDN}/w`, `${CDN}/u`],
+    contentTypes: ["", "model/gltf-binary", "", "", "model/vnd.usdz+zip"],
+  }, "", {});
+  assert.deepEqual(rels.artifacts, ["task-7/w-g-1.mp3", "task-7/w-g-2.glb", "task-7/w-g-3.ts", "task-7/w-g-4.wav", "task-7/w-g-5.usdz"]);
+});
+
+test("saveOutputs: a Text workflow's text is saved as .md with provenance, next to any media", async () => {
+  const f = mockFetch([["GET", `${CDN}/img`, () => file("I", "image/png")]]);
+  restore = f.restore;
+  const s = setup();
+  const only = await s.saveOutputs(CALL, "story", "g1", { originalUrls: [], textContent: "# Chapter\nonce upon" }, "draft", { workflow: "Story" });
+  assert.deepEqual(only, { artifacts: ["task-7/story-g1.md"], skipped: [] });
+  assert.equal(s.read("task-7/story-g1.md"), "# Chapter\nonce upon");
+  assert.equal(s.rec.annotate[0].rel, "task-7/story-g1.md");
+  assert.equal(s.rec.annotate[0].meta.description, "LoreMax Story · generation g1 · draft");
+  assert.deepEqual(s.rec.mirror[0], { workspace: "studio", rels: ["task-7/story-g1.md"] });
+  // the MCP spelling, beside an image
+  const both = await s.saveOutputs(CALL, "story", "g2", { originalUrls: [`${CDN}/img`], contentTypes: ["image/png"], text_content: "caption" }, "", {});
+  assert.deepEqual(both.artifacts, ["task-7/story-g2.png", "task-7/story-g2.md"]);
+  // whitespace only is no text
+  assert.deepEqual(await s.saveOutputs(CALL, "story", "g3", { textContent: "  \n" }, "", {}), { artifacts: [], skipped: [] });
 });
 
 test("saveOutputs: no URLs at all → nothing saved, no mirror", async () => {
