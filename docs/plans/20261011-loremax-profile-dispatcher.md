@@ -381,16 +381,17 @@
 - ➕ the check rereads the catalog (`force`) rather than trusting the cache; a reachable profile with no generation tools fails with "add workflows to the profile"; the stat tile returns `[]` for an invalid `profile_url`; tests live in the new `test/health.test.mjs`
 
 ### Task 10: Verify acceptance criteria
-- [ ] verify the Overview items:
+- [x] verify the Overview items:
   - the Stage 0 fixes are active in REST mode against today's LoreMax behavior (sync rows never polled);
   - profile mode covers catalog, uploads, generation, error mapping, polling, provenance and usage.
-- [ ] verify edge cases:
+- [x] verify edge cases:
   - empty `profile_url` behaves like 0.1.0 plus the Stage 0 fixes;
   - no tool call exceeds the 50 s budget under slow-network fakes (submission, uploads, Retry-After, downloads);
   - background submissions and the watcher never double-finish;
   - a restart during a submission yields exactly one wake.
-- [ ] run the full suite `npm test`
-- [ ] review coverage of new functions by reading the test list against the code paths (the repo has no coverage tool); add missing cases
+- [x] run the full suite `npm test`
+- [x] review coverage of new functions by reading the test list against the code paths (the repo has no coverage tool); add missing cases
+- ➕ the review found that an inline save was not bounded by the 50 s deadline: each download keeps its own 300 s timeout, so a slow CDN could hold a tool call past the client's 60 s. Fixed: on cores with `ctx.jobs` and `ctx.wakeAgent`, an inline `finish` (a sync reply in `landed`, or a completed generation in `waitFor`) is raced against the deadline. Past it, the tool replies `in_progress` ("being saved … you will be WOKEN"); the save goes on in the background, holding `inFlight` so neither the watcher nor `loremax_result` saves it again, and then wakes the agent once. A submission uses the `loremax-submit:` key; a tracked generation uses the watcher's `loremax-job:<id>` key and wakes only after its row has settled. Older cores still block, as in 0.1.0. REST `loremax_workflows` now passes the same 50 s deadline to its requests (a pricing call that runs out of time stays non-fatal). Tests: `test/generate.test.mjs` (slow downloads, sync and polled, older core), `test/workflows.test.mjs` (Retry-After past the deadline)
 
 ### Task 11: [Final] Update documentation
 - [ ] `README.md`:
@@ -425,7 +426,8 @@
   finish reserve. One horizon would leave `loremax_result` with `wait_s: 0` no room for its single check. It would
   also stop a short `wait_s` from ever finishing inline. Non-submission fetches and sleeps never extend past
   `deadline`. The submission request keeps its own 600 s timeout inside the detached unit. Inline `finish` happens
-  only with ≥ ~10 s left before `deadline`; a sync reply that lands later is saved in the background and woken.
+  only with ≥ ~10 s left before `deadline`, and is raced against it; a sync reply that lands later, or a save
+  still downloading at `deadline`, is saved in the background and woken.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

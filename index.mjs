@@ -1216,9 +1216,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       query: z.string().optional().describe("case-insensitive filter over title, description, visual id and category"),
     },
     handler: async (args) => {
+      // under the client's 60 s like every tool call: requests and Retry-After waits end here
+      const deadline = now() + MAX_WAIT_S * 1000;
       const id = String(args.workflow_id ?? "").trim();
       if (!id) {
-        const r = await lmx.restJson("/api/v1/workflows");
+        const r = await lmx.restJson("/api/v1/workflows", {}, { deadline });
         const q = String(args.query ?? "").trim().toLowerCase();
         const workflows = (r.workflows ?? [])
           .map((w) => ({ id: w.id, visual_id: w.visualId, title: w.title, category: w.category, description: short(w.description) }))
@@ -1231,7 +1233,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         }, null, 1)));
       }
       // get_workflow_details takes visual_id but also finds a workflow by its numeric id
-      const d = (await lmx.mcpCall("get_workflow_details", { visual_id: id })) ?? {};
+      const d = (await lmx.mcpCall("get_workflow_details", { visual_id: id }, { deadline })) ?? {};
       const out = {
         workflow: { id: d.id ?? id, visual_id: d.visual_id, title: d.title, category: d.category, description: d.description },
         input_fields: d.input_fields ?? [],
@@ -1240,7 +1242,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       };
       // the price is a courtesy: a pricing hiccup must not hide the fields the agent needs
       try {
-        const p = await lmx.mcpCall("get_pricing", { workflowId: id });
+        const p = await lmx.mcpCall("get_pricing", { workflowId: id }, { deadline });
         out.token_cost = p?.tokenCost;
       } catch (e) {
         out.price = `unavailable: ${short(e?.message ?? e)}`;
@@ -1512,8 +1514,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       prompt,
     });
 
-  /** A synchronous result finished off the tool call (it came late, or too close to the deadline): save, bill, wake. */
-  async function finishLate(ph, job, result) {
+  /** A submission's synchronous result saved and billed, its placeholder settled → { done } | { error }. */
+  async function saveSubmitted(ph, job, result) {
     const { generationId } = job;
     // loremax_result answers "being saved" meanwhile, and nothing else saves it
     inFlight.add(generationId);
@@ -1521,15 +1523,40 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     try {
       const done = await outputs.finish(ph.call, { ...job, trackedId: null }, { result, fromReply: true });
       settleSubmit(ph, "succeeded", { generationId });
-      wakeSubmit(ph, `${ph.what} — generation ${generationId} finished: ${savedList(done)} — check them, then continue where you left off${ph.task}.`);
-    } catch (e) {
-      settleSubmit(ph, "failed", { generationId, error: e?.message ?? e });
-      wakeSubmit(ph, `${ph.what} — generation ${generationId} finished, but saving its outputs failed: ${e?.message ?? e}${ph.task}.`);
+      return { done };
+    } catch (error) {
+      settleSubmit(ph, "failed", { generationId, error: error?.message ?? error });
+      return { error };
     } finally {
       inFlight.delete(generationId);
       generations.delete(generationId);
     }
   }
+
+  const wakeSaved = (ph, generationId, { done, error }) =>
+    wakeSubmit(ph, done
+      ? `${ph.what} — generation ${generationId} finished: ${savedList(done)} — check them, then continue where you left off${ph.task}.`
+      : `${ph.what} — generation ${generationId} finished, but saving its outputs failed: ${error?.message ?? error}${ph.task}.`);
+
+  /** A synchronous result finished off the tool call (it came late, or too close to the deadline): save, bill, wake. */
+  async function finishLate(ph, job, result) {
+    wakeSaved(ph, job.generationId, await saveSubmitted(ph, job, result));
+  }
+
+  /** `work`'s outcome, or null once `deadline` passes first (the work goes on). */
+  async function beforeDeadline(work, deadline) {
+    const timer = new AbortController();
+    const first = await Promise.race([work, sleep(Math.max(0, deadline - now()), timer.signal).then(() => null)]);
+    timer.abort();
+    return first;
+  }
+
+  const beingSaved = (generationId, tokensCost) => ({
+    generation_id: String(generationId),
+    status: "in_progress",
+    tokens_cost: Number(tokensCost) || 0,
+    hint: "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files",
+  });
 
   /** The wake line for a submission that failed off the tool call. */
   const lateFailure = (ph, e) => {
@@ -1561,11 +1588,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
 
   /** The submission raced against the budget: its outcome, or null once `until` passes first (never on a blocking core). */
   async function raceBudget(ph, submission, until) {
-    if (!ph) return submission;
-    const timer = new AbortController();
-    const first = await Promise.race([submission, sleep(Math.max(0, until - now()), timer.signal).then(() => null)]);
-    timer.abort();
-    return first;
+    return ph ? beforeDeadline(submission, until) : submission;
   }
 
   /**
@@ -1575,24 +1598,18 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    */
   async function landed(call, ph, { job, result }, { until, deadline, waitS }) {
     if (result) {
-      // too close to the deadline for downloads: saved in the background, the agent is woken
-      if (ph && deadline - now() < FINISH_RESERVE_MS) {
-        finishLate(ph, job, result).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
-        return {
-          generation_id: job.generationId,
-          status: "in_progress",
-          tokens_cost: job.tokensCost,
-          hint: "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files",
-        };
+      // an older core blocks on the downloads as in 0.1.0
+      if (!ph) return outputs.finish(call, { ...job, trackedId: null }, { result, fromReply: true });
+      // downloads must not outlast the client: too close to the deadline, or past it,
+      // the save goes on in the background and the agent is woken with the files
+      const saving = saveSubmitted(ph, job, result);
+      const first = deadline - now() < FINISH_RESERVE_MS ? null : await beforeDeadline(saving, deadline);
+      if (!first) {
+        saving.then((o) => wakeSaved(ph, job.generationId, o)).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+        return beingSaved(job.generationId, job.tokensCost);
       }
-      try {
-        const done = await outputs.finish(call, { ...job, trackedId: null }, { result, fromReply: true });
-        if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
-        return done;
-      } catch (e) {
-        if (ph) settleSubmit(ph, "failed", { generationId: job.generationId, error: e?.message ?? e });
-        throw e;
-      }
+      if (first.error) throw first.error;
+      return first.done;
     }
     trackGeneration(call, job);
     if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
@@ -1724,6 +1741,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   async function waitFor(call, job, { until, deadline, waitS }) {
     const { generationId, trackedId } = job;
     let landed = false;
+    // a save still running past the deadline holds the generation until it is done
+    let saving = null;
     inFlight.add(generationId);
     try {
       for (;;) {
@@ -1742,9 +1761,21 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
             landed = true;
             break;
           }
-          const done = await outputs.finish(call, job, c);
-          generations.delete(generationId);
-          return done;
+          // the job row settles with the save: past the deadline nothing else would wake the agent
+          if (!(ctx.wakeAgent && trackedId)) {
+            const done = await outputs.finish(call, job, c);
+            generations.delete(generationId);
+            return done;
+          }
+          const work = outputs.finish(call, job, c).then((done) => ({ done }), (error) => ({ error }));
+          const first = await beforeDeadline(work, deadline);
+          if (first) {
+            if (first.error) throw first.error;
+            generations.delete(generationId);
+            return first.done;
+          }
+          saving = work;
+          break;
         }
         if (c?.status === "failed") {
           generations.delete(generationId);
@@ -1757,7 +1788,27 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         await sleep(pollMs);
       }
     } finally {
-      inFlight.delete(generationId);
+      if (!saving) inFlight.delete(generationId);
+    }
+    if (saving) {
+      saving
+        .then(({ done, error }) => {
+          inFlight.delete(generationId);
+          // a failed save leaves the job running: the watcher tries again and wakes
+          if (error) return ctx.log.warn(`loremax ${generationId}: saving its outputs failed: ${error?.message ?? error}`);
+          generations.delete(generationId);
+          const label = jobLabel(job.note, job.tokensCost);
+          ctx.wakeAgent({
+            workspace: call.workspace,
+            agent: call.agent,
+            // the watcher's key for this row: one wake per generation
+            key: `loremax-job:${trackedId}`,
+            ...(call.sessionKey ? { sessionKey: call.sessionKey } : {}),
+            prompt: `LoreMax generation ${generationId} (${job.workflow || "workflow"} — ${label}) finished: ${savedList(done)} — check them, then continue where you left off${call.taskId ? ` (task ${call.taskId})` : ""}.`,
+          });
+        })
+        .catch((e) => ctx.log.warn(`loremax ${generationId}: ${e?.message ?? e}`));
+      return beingSaved(generationId, job.tokensCost);
     }
     if (landed)
       return {

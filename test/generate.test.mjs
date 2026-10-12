@@ -576,6 +576,105 @@ test("completed near the deadline: in_progress without saving; the watcher saves
   assert.match(s.rec.wakes[0].prompt, /finished: artifacts\/task-9\/w-501\.png/);
 });
 
+test("a synchronous result whose downloads outlast the deadline: the reply comes at 50 s, the save goes on and wakes once", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/big.mp4`] })],
+    ["GET", `${CDN}/big.mp4`, async () => {
+      await gate.until;
+      return new Response("MP4", { headers: { "content-type": "video/mp4" } });
+    }],
+  ]);
+  restore = f.restore;
+  const replying = s.run({ workflow_id: "kling", inputs: {}, note: "hero" });
+  // the download hangs on a slow CDN until the 50 s deadline passes
+  await eventually(() => f.calls.some((c) => c.url.endsWith("/big.mp4")), "the download");
+  await s.time.expire();
+  const reply = await replying;
+  assert.equal(reply.status, "in_progress");
+  assert.equal(reply.generation_id, "777");
+  assert.match(reply.hint, /being saved.*WOKEN with the files/);
+  assert.ok(s.clock.t <= 50_000);
+  assert.equal(s.rec.usage.length, 0);
+  assert.equal(s.placeholders()[0].status, "running");
+  // meanwhile loremax_result does not start a second save
+  const meanwhile = JSON.parse((await s.rec.tools.get("loremax_result").handler({ generation_id: "777" }, CALL)).content[0].text);
+  assert.match(meanwhile.hint, /being checked and saved right now/);
+
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the wake");
+  assert.equal(s.rec.wakes[0].key, `loremax-${s.placeholders()[0].externalId}`);
+  assert.match(s.rec.wakes[0].prompt, /generation 777 finished: artifacts\/task-9\/kling-777\.mp4/);
+  assert.ok(fs.existsSync(path.join(s.art, "task-9/kling-777.mp4")));
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.placeholders()[0].status, "succeeded");
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/big.mp4")).length, 1);
+  assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
+});
+
+test("a polled generation whose downloads outlast the deadline: saved in the background, one wake, the watcher never saves it twice", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => EXECUTE],
+    checkRoute(s, [DONE]),
+    ["GET", `${CDN}/out.png`, async () => {
+      await gate.until;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+  ]);
+  restore = f.restore;
+  const downloads = () => f.calls.filter((c) => c.url.endsWith("/out.png")).length;
+  const replying = s.run({ workflow_id: "w", inputs: { prompt: "p" } });
+  await eventually(() => downloads() === 1, "the download");
+  await s.time.expire();
+  const reply = await replying;
+  assert.equal(reply.status, "in_progress");
+  assert.equal(reply.generation_id, "501");
+  assert.match(reply.hint, /being saved.*WOKEN with the files/);
+  assert.ok(s.clock.t <= 50_000);
+  assert.equal(s.gens()[0].status, "running");
+  // a watcher pass while the save runs leaves the generation to it
+  await s.watchOnce();
+  assert.equal(downloads(), 1);
+  assert.equal(s.rec.wakes.length, 0);
+
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the wake");
+  const w = s.rec.wakes[0];
+  assert.equal(w.key, `loremax-job:${s.gens()[0].id}`);
+  assert.equal(w.sessionKey, "sess-1");
+  assert.match(w.prompt, /LoreMax generation 501 \(w — p · 12 tk\) finished: artifacts\/task-9\/w-501\.png .*\(task task-9\)/);
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.equal(s.rec.usage.length, 1);
+  await s.watchOnce();
+  assert.equal(s.rec.wakes.length, 1);
+  assert.equal(downloads(), 1);
+  assert.equal(s.rec.usage.length, 1);
+});
+
+test("older core without wakeAgent: a slow download blocks the call as in 0.1.0 and is saved inline", async () => {
+  const s = await setup({ patch: (ctx) => delete ctx.wakeAgent });
+  const gate = held();
+  let answered = false;
+  restore = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/now.png`] })],
+    ["GET", `${CDN}/now.png`, async () => {
+      await gate.until;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+  ]).restore;
+  const replying = s.run({ workflow_id: "w", inputs: {} }).then((r) => ((answered = true), r));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(answered, false);
+  assert.equal(s.time.races.length, 0);
+  gate.open();
+  const reply = await replying;
+  assert.equal(reply.status, "completed");
+  assert.deepEqual(reply.artifacts, ["task-9/w-777.png"]);
+});
+
 test("a Retry-After that does not fit before the deadline is not slept; one that fits is", async () => {
   const s = await setup({ tick: 25_000 });
   restore = mockFetch([

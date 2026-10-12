@@ -2,7 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import activate from "../index.mjs";
-import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError } from "./helpers.mjs";
+import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError, fakeSleep } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const tool = async () => {
@@ -143,6 +143,30 @@ test("details: a huge field dump is capped at 14 000 chars", async () => {
   const out = (await rec.tools.get("loremax_workflows").handler({ workflow_id: "1" }, {})).content[0].text;
   assert.ok(out.length <= 14_000 + "\n…(truncated)".length);
   assert.ok(out.endsWith("…(truncated)"));
+});
+
+test("REST mode: the call stays under the client timeout — a Retry-After that does not fit in 50 s is not slept", async () => {
+  const clock = { t: 0 };
+  // each request takes 25 s on a slow network: a 30 s Retry-After after one no longer fits
+  const slow = (reply) => () => ((clock.t += 25_000), reply);
+  const f = mockFetch([
+    ["GET", "/api/v1/workflows", slow(jsonResponse({ error: "slow down" }, 429, { "retry-after": "30" }))],
+    mcpRoute({
+      get_workflow_details: slow(mcpResult({ id: 11, input_fields: [{ key: "prompt" }] })),
+      get_pricing: slow(jsonResponse({ error: "slow down" }, 429, { "retry-after": "30" })),
+    }),
+  ]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  const time = fakeSleep(clock);
+  await activate(ctx, { now: () => clock.t, sleep: time.sleep });
+  const t = rec.tools.get("loremax_workflows");
+  await assert.rejects(t.handler({}, {}), /out of time/);
+  // the price is a courtesy: out of time for it, the fields still come back
+  const r = JSON.parse((await t.handler({ workflow_id: "11" }, {})).content[0].text);
+  assert.equal(r.input_fields[0].key, "prompt");
+  assert.match(r.price, /^unavailable: .*out of time/);
+  assert.deepEqual(time.slept, []);
 });
 
 test("REST mode: description, schema and calls are 0.1.0's", async () => {
