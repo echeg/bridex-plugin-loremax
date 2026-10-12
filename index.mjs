@@ -1903,12 +1903,16 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // run that died mid-wait (restart, crash, wait budget) still gets its
   // outputs saved and the agent woken in the session it came from.
   let watching = false;
+  // finished generations whose save failed here: the agent was woken with the error and
+  // saves them with loremax_result — not downloaded again every pass (until the 6h give-up)
+  const unsaved = new Set();
   async function watchOnce() {
     if (watching || !ctx.jobs) return;
     watching = true;
     try {
       for (const j of ctx.jobs.pending()) {
         if (inFlight.has(j.externalId)) continue;
+        if (unsaved.has(j.externalId) && now() - Date.parse(j.createdAt) <= GIVE_UP_MS) continue;
         // the list is read once per pass and a pass can take minutes (downloads):
         // a tool call may have finished this one meanwhile — don't save, bill and wake twice
         const cur = ctx.jobs.find?.(j.externalId);
@@ -1941,7 +1945,26 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           }
           if (c?.status === "completed") {
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
-            const done = await outputs.finish(call, job, c);
+            let done;
+            try {
+              done = await outputs.finish(call, job, c);
+            } catch (e) {
+              const error = String(e?.message ?? e);
+              ctx.log.warn(`loremax job ${j.externalId}: saving its outputs failed: ${error}`);
+              if (expired) {
+                generations.delete(j.externalId);
+                unsaved.delete(j.externalId);
+                ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error: `saving its outputs failed: ${error}`.slice(0, 300) });
+                wake(`${what} finished, but saving its outputs still failed after 6h: ${error} — it was given up; check it on LoreMax${task}.`);
+              } else if (!unsaved.has(j.externalId)) {
+                unsaved.add(j.externalId);
+                // its own key: the row's key stays free for a wake with the files after a restart
+                ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-save:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}),
+                  prompt: `${what} finished, but saving its outputs failed: ${error}${error.includes("loremax_result") ? "" : ` — fix that, then call loremax_result with generation_id ${j.externalId}`}${task}.` });
+              }
+              continue;
+            }
+            unsaved.delete(j.externalId);
             generations.delete(j.externalId);
             wake(`${what} finished: ${savedList(done)} — check them, then continue where you left off${task}.`);
           } else if (c?.status === "failed") {

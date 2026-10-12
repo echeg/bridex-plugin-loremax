@@ -147,6 +147,53 @@ test("watcher: a Text workflow's result.textContent from /check is saved as .md 
   assert.equal(s.rec.usage[0].ref, "501");
 });
 
+test("watcher: a finished job whose save fails wakes once, is not downloaded again every pass", async () => {
+  const s = await setup();
+  s.track({ model: "story" });
+  // the task folder's name is taken by a file: the text cannot be written
+  fs.mkdirSync(s.art, { recursive: true });
+  fs.writeFileSync(path.join(s.art, "task-9"), "not a folder");
+  const TEXT = { status: "completed", result: { originalUrls: [`${CDN}/out.png`], previewUrls: [], contentTypes: ["image/png"], textContent: "The end." } };
+  const f = mockFetch([checkRoute(s, [TEXT]), PNG]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "running");
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /501 .*finished, but saving its outputs failed: .*loremax_result/);
+  assert.equal(s.rec.wakes[0].key, `loremax-save:${s.jobs[0].id}`);
+  const calls = f.calls.length;
+  // later passes leave it to loremax_result: no /check, no download, no second wake
+  await s.watchOnce();
+  await s.watchOnce();
+  assert.equal(f.calls.length, calls);
+  assert.equal(s.rec.wakes.length, 1);
+  // once the folder is writable, loremax_result saves it and settles the row
+  fs.rmSync(path.join(s.art, "task-9"));
+  const r = await s.run({ generation_id: "501" });
+  assert.equal(r.status, "completed");
+  assert.ok(r.artifacts.includes("task-9/story-501.md"));
+  assert.equal(s.jobs[0].status, "succeeded");
+  // one spend: the host counts one per ref
+  assert.deepEqual([...new Set(s.rec.usage.map((u) => u.ref))], ["501"]);
+});
+
+test("watcher: a finished job whose save still fails after 6h is settled failed and woken", async () => {
+  const s = await setup();
+  s.track({ model: "story" });
+  fs.mkdirSync(s.art, { recursive: true });
+  fs.writeFileSync(path.join(s.art, "task-9"), "not a folder");
+  const f = mockFetch([checkRoute(s, [{ status: "completed", result: { originalUrls: [], previewUrls: [], contentTypes: [], textContent: "The end." } }])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "running");
+  s.clock.t += 7 * 3_600_000;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "failed");
+  assert.match(s.jobs[0].error, /^saving its outputs failed: /);
+  assert.equal(s.rec.wakes.length, 2);
+  assert.match(s.rec.wakes[1].prompt, /still failed after 6h/);
+});
+
 test("watcher after a restart: provenance and cost come from the job row's track() params", async () => {
   const s = await setup();
   s.track({ label: "x", params: { inputs: { prompt: "rain" }, references: ["artifacts/r.png"], tokensCost: 9, note: "hero" } });
