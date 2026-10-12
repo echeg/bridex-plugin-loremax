@@ -221,3 +221,158 @@ test("restJson: a request cut short by the deadline is a deadline error, not a t
     globalThis.fetch = mocked;
   }
 });
+
+const PROFILE = "/api/mcp/s/AbCdEfGh12345678";
+const toolText = (data, { id = 1, isError = false } = {}) =>
+  ({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(data) }], ...(isError ? { isError: true } : {}) } });
+
+test("rpc: a single message goes to the path with Bearer and returns the reply message", async () => {
+  const f = mockFetch([["POST", PROFILE, (req) => ({ jsonrpc: "2.0", id: req.json.id, result: { tools: [] } })]]);
+  restore = f.restore;
+  const { c } = client();
+  const msg = await c.rpc(PROFILE, { jsonrpc: "2.0", id: 7, method: "tools/list" });
+  assert.deepEqual(msg, { jsonrpc: "2.0", id: 7, result: { tools: [] } });
+  assert.equal(f.calls[0].url, `${BASE}${PROFILE}`);
+  assert.equal(f.calls[0].headers.authorization, "Bearer lmx_prod_k");
+  assert.equal(f.calls[0].json.method, "tools/list");
+});
+
+test("rpc: a batch goes as one POST and the replies come back keyed by id, whatever their order", async () => {
+  const f = mockFetch([["POST", PROFILE, (req) => jsonResponse(req.json.map((m) => toolText({ asset_id: `a${m.id}` }, { id: m.id })).reverse())]]);
+  restore = f.restore;
+  const { c } = client();
+  const batch = [1, 2, 3].map((n) => ({ jsonrpc: "2.0", id: c.nextId(), method: "tools/call", params: { name: "request_upload_url", arguments: { n } } }));
+  const replies = await c.rpc(PROFILE, batch);
+  assert.equal(f.calls.length, 1);
+  assert.ok(Array.isArray(f.calls[0].json));
+  assert.equal(replies.size, 3);
+  for (const m of batch) assert.deepEqual(c.toolResult("request_upload_url", replies.get(m.id)), { asset_id: `a${m.id}` });
+  // a message the server did not answer is a clear error, not undefined data
+  assert.throws(() => c.toolResult("request_upload_url", replies.get(999)), /loremax request_upload_url: no reply/);
+});
+
+test("rpc: a batch rejected as a whole surfaces the server's error", async () => {
+  const f = mockFetch([["POST", PROFILE, () => ({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Batch too large" } })]]);
+  restore = f.restore;
+  await assert.rejects(client().c.rpc(PROFILE, [{ jsonrpc: "2.0", id: 1, method: "tools/list" }]), /Batch too large/);
+});
+
+test("rpc: 429 → one retry through the sleep seam; a Retry-After past the deadline is not slept", async () => {
+  const clock = { t: 0 };
+  const slept = [];
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  const c = createClient(ctx, { now: () => clock.t, sleep: async (ms) => slept.push(ms) });
+  let limited = 1;
+  const f = mockFetch([["POST", PROFILE, (req) => (limited-- > 0 ? jsonResponse({ error: "slow down" }, 429, { "retry-after": "3" }) : { jsonrpc: "2.0", id: req.json.id, result: {} })]]);
+  restore = f.restore;
+  await c.rpc(PROFILE, { jsonrpc: "2.0", id: 1, method: "tools/list" }, { deadline: 60_000 });
+  assert.deepEqual(slept, [3_000]);
+  assert.equal(f.calls.length, 2);
+  limited = 1;
+  const err = await c.rpc(PROFILE, { jsonrpc: "2.0", id: 2, method: "tools/list" }, { deadline: 2_000 }).catch((e) => e);
+  assert.equal(err.deadline, true);
+  assert.equal(f.calls.length, 3);
+  assert.deepEqual(slept, [3_000]);
+  // past the deadline nothing is sent at all
+  clock.t = 5_000;
+  const late = await c.rpc(PROFILE, { jsonrpc: "2.0", id: 3, method: "tools/list" }, { deadline: 5_000 }).catch((e) => e);
+  assert.equal(late.deadline, true);
+  assert.equal(f.calls.length, 3);
+});
+
+test("rpc: HTTP 404 on a profile path is PROFILE_NOT_FOUND with the three-cause hint, not retried", async () => {
+  const f = mockFetch([["POST", PROFILE, () => new Response("Not found", { status: 404 })]]);
+  restore = f.restore;
+  const { c, rec } = client();
+  const err = await c.toolCall(PROFILE, "get_balance").catch((e) => e);
+  assert.equal(err.code, "PROFILE_NOT_FOUND");
+  assert.equal(err.status, 404);
+  assert.equal(err.retryable, false);
+  assert.equal(err.charged, false);
+  assert.match(err.message, /unknown/);
+  assert.match(err.message, /disabled/);
+  assert.match(err.message, /LOREMAX_API_KEY belongs to another organization/);
+  assert.match(err.message, /profile_url/);
+  assert.equal(f.calls.length, 1);
+  assert.equal(rec.outOfFunds.length, 0);
+  // a 404 on the organization endpoint stays a plain HTTP error
+  const g = mockFetch([["POST", "/api/mcp", () => new Response("Not found", { status: 404 })]]);
+  restore = () => (g.restore(), f.restore());
+  const plain = await c.mcpCall("get_balance").catch((e) => e);
+  assert.equal(plain.code, undefined);
+  assert.match(plain.message, /^loremax 404 \/api\/mcp get_balance/);
+});
+
+test("rpc: a non-JSON body is a clear error", async () => {
+  const f = mockFetch([["POST", PROFILE, () => new Response("<html>gateway</html>", { status: 200 })]]);
+  restore = f.restore;
+  await assert.rejects(client().c.toolCall(PROFILE, "get_balance"), new RegExp(`non-JSON from ${PROFILE} get_balance`));
+});
+
+test("toolCall: tools/call envelope on the profile path → the tool data", async () => {
+  const f = mockFetch([["POST", PROFILE, (req) => jsonResponse(toolText({ generationId: "g1", status: "pending" }, { id: req.json.id }))]]);
+  restore = f.restore;
+  const { c } = client();
+  assert.deepEqual(await c.toolCall(PROFILE, "flux_portrait", { prompt: "cat" }), { generationId: "g1", status: "pending" });
+  assert.deepEqual(f.calls[0].json.params, { name: "flux_portrait", arguments: { prompt: "cat" } });
+  assert.equal(f.calls[0].json.method, "tools/call");
+});
+
+test("toolCall: preflight codes are not charged; other codes and an uncoded isError leave charged unknown", async () => {
+  const { c } = client();
+  for (const code of ["SCHEMA_REVISION_MISMATCH", "INVALID_WORKFLOW_INPUT", "MEDIA_INPUT_INVALID", "WORKFLOW_UNAVAILABLE", "PROFILE_ORGANIZATION_MISMATCH"]) {
+    const f = mockFetch([["POST", PROFILE, () => jsonResponse(toolText({ error: `${code} happened`, errorCode: code, details: { issues: [] } }, { isError: true }))]]);
+    const err = await c.toolCall(PROFILE, "flux_portrait", {}).catch((e) => e);
+    f.restore();
+    assert.equal(err.code, code);
+    assert.equal(err.charged, false, code);
+    assert.deepEqual(err.details, { issues: [] });
+    assert.match(err.message, new RegExp(`loremax flux_portrait: ${code} happened`));
+  }
+  for (const code of ["GENERATION_FAILED", "GENERATION_NOT_FOUND"]) {
+    const f = mockFetch([["POST", PROFILE, () => jsonResponse(toolText({ error: "boom", errorCode: code, details: { generationId: "g9" } }, { isError: true }))]]);
+    const err = await c.toolCall(PROFILE, "flux_portrait", {}).catch((e) => e);
+    f.restore();
+    assert.equal(err.code, code);
+    assert.equal(err.charged, undefined, code);
+    assert.deepEqual(err.details, { generationId: "g9" });
+  }
+  // uncoded: no code, no details
+  const f = mockFetch([["POST", PROFILE, () => jsonResponse(toolText({ error: "something odd" }, { isError: true }))]]);
+  restore = f.restore;
+  const err = await c.toolCall(PROFILE, "flux_portrait", {}).catch((e) => e);
+  assert.match(err.message, /loremax flux_portrait: something odd/);
+  assert.equal(err.code, undefined);
+  assert.equal(err.details, undefined);
+  assert.equal(err.charged, undefined);
+});
+
+test("toolCall: JSON-RPC -32601 (never-bound tool) is TOOL_NOT_FOUND; another JSON-RPC error carries no code", async () => {
+  const f = mockFetch([["POST", PROFILE, (req) => ({ jsonrpc: "2.0", id: req.json.id, error: { code: -32601, message: "Tool not found: nope" } })]]);
+  restore = f.restore;
+  const { c } = client();
+  const err = await c.toolCall(PROFILE, "nope").catch((e) => e);
+  assert.equal(err.code, "TOOL_NOT_FOUND");
+  assert.equal(err.charged, false);
+  assert.match(err.message, /loremax nope: Tool not found: nope/);
+  const g = mockFetch([["POST", PROFILE, (req) => ({ jsonrpc: "2.0", id: req.json.id, error: { code: -32603, message: "Internal error" } })]]);
+  restore = () => (g.restore(), f.restore());
+  const other = await c.toolCall(PROFILE, "flux_portrait").catch((e) => e);
+  assert.equal(other.code, undefined);
+  assert.match(other.message, /Internal error/);
+});
+
+test("toolCall: an out-of-funds error opens the billing card exactly once", async () => {
+  const f = mockFetch([["POST", PROFILE, () => jsonResponse(toolText({ error: "Insufficient tokens: need 40, have 3", errorCode: "INSUFFICIENT_TOKENS", details: { requiredTokens: 40 } }, { isError: true }))]]);
+  restore = f.restore;
+  const { c, rec } = client();
+  const err = await c.toolCall(PROFILE, "flux_portrait", {}).catch((e) => e);
+  assert.equal(err.code, "INSUFFICIENT_TOKENS");
+  assert.equal(rec.outOfFunds.length, 1);
+  assert.match(rec.outOfFunds[0].detail, /need 40/);
+  // a 402 at the HTTP level: one card too
+  const g = mockFetch([["POST", PROFILE, () => jsonResponse({ error: "Insufficient tokens" }, 402)]]);
+  restore = () => (g.restore(), f.restore());
+  await assert.rejects(c.toolCall(PROFILE, "flux_portrait", {}), /loremax 402/);
+  assert.equal(rec.outOfFunds.length, 2);
+});

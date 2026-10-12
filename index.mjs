@@ -51,6 +51,8 @@ const BALANCE_TTL_MS = 60_000;
 const PROFILE_ID_RE = /^[A-Za-z0-9]{16}$/;
 const PROFILE_HINT =
   "set plugins.loremax.config.profile_url to the profile URL from LoreMax → Organization → MCP (https://<LoreMax>/api/mcp/s/<publicId>) or its 16-character publicId — or clear it to use every workflow of the organization";
+/** Profile errors raised before any debit: the call was refused, nothing was charged. */
+const PREFLIGHT_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "INVALID_WORKFLOW_INPUT", "MEDIA_INPUT_INVALID", "WORKFLOW_UNAVAILABLE", "PROFILE_ORGANIZATION_MISMATCH"]);
 const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
 
 const EXT_BY_MIME = {
@@ -99,8 +101,9 @@ function httpError(message, status, body) {
 
 /**
  * Config + the two LoreMax transports: REST (/api/v1, /api/v2 with X-API-Key)
- * and the stateless MCP endpoint (/api/mcp, Bearer) for what REST lacks —
- * workflow details, pricing, balance.
+ * and stateless JSON-RPC (Bearer) on the organization MCP endpoint (/api/mcp)
+ * for what REST lacks — workflow details, pricing, balance — and on a profile
+ * path (/api/mcp/s/<publicId>).
  */
 export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   const cfg = {
@@ -210,15 +213,18 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   }
 
   let rpcId = 0;
+  const nextId = () => ++rpcId;
   /**
-   * One stateless tools/call (no initialize needed) → the tool's data. LoreMax
-   * puts the data itself as JSON in the text content; a failed tool sets
-   * `isError` with `{"error": "…", "errorCode"?, "details"?}` there — code and
-   * details ride on the thrown error as `code` / `details`.
+   * One stateless JSON-RPC POST (no initialize needed) to `path` on baseUrl()
+   * with the Bearer key → the reply message, or for a batch array a Map of the
+   * reply messages by id (the caller keeps batches ≤ 50). A profile path that
+   * answers 404 is PROFILE_NOT_FOUND: LoreMax gives an unknown, a disabled and
+   * another organization's profile the same 404, so the hint names all three.
    */
-  async function mcpCall(tool, args = {}, opts = {}) {
-    const label = `/api/mcp ${tool}`;
-    const { res, body } = await send(`${baseUrl()}/api/mcp`, {
+  async function rpc(path, payload, { label, ...opts } = {}) {
+    const batch = Array.isArray(payload);
+    label ??= `${path} ${batch ? `batch of ${payload.length}` : payload.method}`;
+    const { res, body } = await send(`${baseUrl()}${path}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${key()}`,
@@ -226,8 +232,14 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
         // Streamable HTTP clients announce both; LoreMax answers with plain JSON
         Accept: "application/json, text/event-stream",
       },
-      body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name: tool, arguments: args } }),
+      body: JSON.stringify(payload),
     }, label, opts);
+    if (res.status === 404 && path.startsWith("/api/mcp/s/")) {
+      throw Object.assign(
+        new Error(`loremax ${label}: profile not found (HTTP 404) — the profile is unknown, disabled in LoreMax, or LOREMAX_API_KEY belongs to another organization; ${PROFILE_HINT}`),
+        { status: 404, body, code: "PROFILE_NOT_FOUND", retryable: false, charged: false },
+      );
+    }
     if (!res.ok) {
       if (res.status === 402 || /insufficient tokens/i.test(body)) outOfFunds(body);
       throw httpError(`loremax ${res.status} ${label}: ${body.slice(0, 400)}`, res.status, body);
@@ -238,24 +250,54 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     } catch {
       throw httpError(`loremax returned non-JSON from ${label}: ${body.slice(0, 200)}`, res.status, body);
     }
-    if (msg.error) throw new Error(`loremax ${tool}: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
+    if (!batch) return msg;
+    // a batch the server could not read at all comes back as one error message
+    if (!Array.isArray(msg)) throw new Error(`loremax ${label}: ${msg?.error?.message ?? JSON.stringify(msg).slice(0, 200)}`.slice(0, 500));
+    return new Map(msg.filter((m) => m && m.id != null).map((m) => [m.id, m]));
+  }
+
+  /**
+   * A tools/call reply message → the tool's data. LoreMax puts the data itself
+   * as JSON in the text content; a failed tool sets `isError` with
+   * `{"error": "…", "errorCode"?, "details"?}` there — code and details ride on
+   * the thrown error as `code` / `details`, and a preflight code adds
+   * `charged: false`. A never-bound tool name (JSON-RPC -32601) is TOOL_NOT_FOUND.
+   */
+  function toolResult(name, msg) {
+    if (msg == null) throw new Error(`loremax ${name}: no reply to this call`);
+    if (msg.error) {
+      const e = new Error(`loremax ${name}: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
+      if (msg.error.code === -32601) Object.assign(e, { code: "TOOL_NOT_FOUND", charged: false });
+      throw e;
+    }
     const t = (msg.result?.content ?? []).find((c) => c?.type === "text")?.text ?? "";
     let out;
     try {
       out = JSON.parse(t);
     } catch {
-      throw new Error(`loremax ${tool}: ${(t || "empty tool result").slice(0, 400)}`);
+      throw new Error(`loremax ${name}: ${(t || "empty tool result").slice(0, 400)}`);
     }
     if (msg.result?.isError) {
       const errText = typeof out?.error === "string" ? out.error : JSON.stringify(out?.error ?? out ?? "unknown error");
-      if (/insufficient tokens/i.test(errText) || out?.errorCode === "INSUFFICIENT_TOKENS") outOfFunds(errText);
-      throw Object.assign(new Error(`loremax ${tool}: ${errText}`.slice(0, 500)), {
-        ...(typeof out?.errorCode === "string" ? { code: out.errorCode } : {}),
+      const code = typeof out?.errorCode === "string" ? out.errorCode : undefined;
+      if (/insufficient tokens/i.test(errText) || code === "INSUFFICIENT_TOKENS") outOfFunds(errText);
+      throw Object.assign(new Error(`loremax ${name}: ${errText}`.slice(0, 500)), {
+        code,
         ...(out?.details != null ? { details: out.details } : {}),
+        ...(PREFLIGHT_CODES.has(code) ? { charged: false } : {}),
       });
     }
     return out;
   }
+
+  /** One tools/call on `path` (`/api/mcp` or a profile path) → the tool's data. */
+  async function toolCall(path, name, args = {}, opts = {}) {
+    const msg = await rpc(path, { jsonrpc: "2.0", id: nextId(), method: "tools/call", params: { name, arguments: args } }, { ...opts, label: `${path} ${name}` });
+    return toolResult(name, msg);
+  }
+
+  /** A tool of the organization-wide endpoint, for what REST lacks — workflow details, pricing, balance. */
+  const mcpCall = (tool, args = {}, opts = {}) => toolCall("/api/mcp", tool, args, opts);
 
   /** One /check of a generation; LoreMax answers a failed one with HTTP 500 and `status: "failed"` in the body. */
   async function check(generationId, { deadline, timeoutMs = 30_000 } = {}) {
@@ -271,7 +313,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     }
   }
 
-  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, profilePath, usdPerToken, defaultWaitS, restJson, mcpCall, check };
+  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, profilePath, usdPerToken, defaultWaitS, restJson, rpc, nextId, toolResult, toolCall, mcpCall, check };
 }
 
 /** What the agent should do with a finished generation's outputs. */

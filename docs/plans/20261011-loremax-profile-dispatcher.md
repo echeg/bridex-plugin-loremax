@@ -252,17 +252,17 @@
 - [x] run `npm test` - must pass before task 4
 
 ### Task 4: Generalized JSON-RPC client for profile and generic endpoints
-- [ ] add `rpc(path, payload, {timeoutMs, deadline})` to `createClient`:
+- [x] add `rpc(path, payload, {timeoutMs, deadline})` to `createClient`:
   - Bearer auth; a single message or a JSON-RPC batch array (the caller keeps batches ≤ 50);
   - one deadline-aware 429 retry; non-JSON guard; per-message results keyed by id;
   - HTTP 404 on a profile path → error `PROFILE_NOT_FOUND`. It is not retryable, and its hint names all three causes: unknown profile, disabled profile, or a `LOREMAX_API_KEY` from another organization.
-- [ ] add `toolCall(path, name, args, opts)` on top. It parses the text content. An `isError` result becomes an Error with:
+- [x] add `toolCall(path, name, args, opts)` on top. It parses the text content. An `isError` result becomes an Error with:
   - `code` (`errorCode`, or `undefined` when uncoded) and `details`;
   - `charged: false` for the preflight codes (`SCHEMA_REVISION_MISMATCH`, `INVALID_WORKFLOW_INPUT`, `MEDIA_INPUT_INVALID`, `WORKFLOW_UNAVAILABLE`, `PROFILE_ORGANIZATION_MISMATCH`).
 
   JSON-RPC `-32601` → `code: 'TOOL_NOT_FOUND'`. "Insufficient tokens" or `INSUFFICIENT_TOKENS` → the out-of-funds card, as today.
-- [ ] re-implement `mcpCall` as `toolCall('/api/mcp', …)` with no behavior change for REST mode
-- [ ] write tests in `test/http.test.mjs`:
+- [x] re-implement `mcpCall` as `toolCall('/api/mcp', …)` with no behavior change for REST mode
+- [x] write tests in `test/http.test.mjs`:
   - batch request/response matched by id;
   - 429 retry and deadline;
   - 404 profile with its hint;
@@ -270,7 +270,8 @@
   - `-32601`;
   - the out-of-funds card fires once;
   - non-JSON body.
-- [ ] run `npm test` - must pass before task 5
+- ➕ `rpc` returns the reply message for a single payload and a `Map` by id for a batch; `toolResult(name, msg)` and `nextId()` are exposed for the Task 7 upload batches; `-32601` also sets `charged: false`
+- [x] run `npm test` - must pass before task 5
 
 ### Task 5: Profile catalog cache
 - [ ] add `createProfileCatalog(lmx)` with `get({force})`: `tools/list` on the profile path, cached ~10 min, refreshed on `force` and after `SCHEMA_REVISION_MISMATCH`, `WORKFLOW_UNAVAILABLE`, `TOOL_NOT_FOUND`
