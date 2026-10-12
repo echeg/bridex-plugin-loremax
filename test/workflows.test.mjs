@@ -1,5 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import activate from "../index.mjs";
 import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError } from "./helpers.mjs";
 
@@ -142,4 +143,165 @@ test("details: a huge field dump is capped at 14 000 chars", async () => {
   const out = (await rec.tools.get("loremax_workflows").handler({ workflow_id: "1" }, {})).content[0].text;
   assert.ok(out.length <= 14_000 + "\n…(truncated)".length);
   assert.ok(out.endsWith("…(truncated)"));
+});
+
+test("REST mode: description, schema and calls are 0.1.0's", async () => {
+  const f = mockFetch([["GET", "/api/v1/workflows", () => LIST]]);
+  restore = f.restore;
+  const { run, rec } = await tool();
+  const t = rec.tools.get("loremax_workflows");
+  assert.deepEqual(Object.keys(t.schema), ["workflow_id", "query"]);
+  assert.match(t.description, /price in LoreMax tokens — ALWAYS read it before a paid loremax_generate/);
+  assert.doesNotMatch(t.description, /curated/);
+  await run({});
+  assert.ok(f.calls.every((c) => !c.url.includes("/api/mcp/s/")));
+});
+
+// ---------- profile mode ----------
+
+const PROFILE = "AbCdEfGh12345678";
+const FIXTURE = JSON.parse(fs.readFileSync(new URL("./fixtures/profile-tools-list.json", import.meta.url), "utf8"));
+
+/** loremax_workflows in profile mode; the profile answers tools/list with `tools()` (re-read per request). */
+async function profileTool(tools = () => structuredClone(FIXTURE.result.tools)) {
+  const f = mockFetch([[
+    "POST",
+    `/api/mcp/s/${PROFILE}`,
+    (req) => jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: { tools: tools() } }),
+  ]]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, profile_url: PROFILE } });
+  await activate(ctx);
+  const t = rec.tools.get("loremax_workflows");
+  const raw = async (args) => (await t.handler(args, {})).content[0].text;
+  const lists = () => f.calls.filter((c) => c.json?.method === "tools/list").length;
+  return { t, raw, run: async (args) => JSON.parse(await raw(args)), f, rec, lists };
+}
+
+test("profile: registered with {tool, query} and a curated, free, price-less description", async () => {
+  const { t } = await profileTool();
+  assert.deepEqual(Object.keys(t.schema), ["tool", "query"]);
+  assert.match(t.description, /curated/);
+  assert.match(t.description, /free/);
+  assert.match(t.description, /No price is shown/);
+  assert.doesNotMatch(t.description, /workflow_id/);
+});
+
+test("profile list: generation tools only, with required and file_args; no REST call", async () => {
+  const { run, f } = await profileTool();
+  const r = await run({});
+  assert.ok(f.calls.every((c) => c.url === `${BASE}/api/mcp/s/${PROFILE}`));
+  assert.deepEqual(r.tools.map((t) => t.tool), ["write_text", "masked_edit", "styled_portrait"]);
+  const masked = r.tools.find((t) => t.tool === "masked_edit");
+  assert.deepEqual(Object.keys(masked), ["tool", "title", "category", "description", "required", "file_args"]);
+  assert.equal(masked.category, "Image");
+  assert.ok(masked.description.length <= 200);
+  assert.ok(!masked.required.includes("schema_revision"));
+  assert.ok(masked.required.includes("source"));
+  assert.deepEqual(masked.file_args, [
+    { name: "source", mediaType: "image", cardinality: "single" },
+    { name: "edit_mask", mediaType: "image", cardinality: "single" },
+  ]);
+  assert.deepEqual(r.tools.find((t) => t.tool === "write_text").file_args, []);
+  assert.match(r.hint, /with tool/);
+});
+
+test("profile list: query filters over tool, title, category and visual id", async () => {
+  const { run, lists } = await profileTool();
+  const names = async (query) => (await run({ query })).tools.map((t) => t.tool);
+  assert.deepEqual(await names("WRITE_"), ["write_text"]); // tool name
+  assert.deepEqual(await names("styled port"), ["styled_portrait"]); // title
+  assert.deepEqual(await names("portraits"), ["styled_portrait"]); // category
+  assert.deepEqual(await names("masked-edit"), ["masked_edit"]); // visual id
+  const none = await run({ query: "nothing-like-this" });
+  assert.deepEqual(none.tools, []);
+  assert.match(none.hint, /no tool matches "nothing-like-this"/);
+  // the catalog is cached: one tools/list for all of these
+  assert.equal(lists(), 1);
+});
+
+test("profile list: an empty profile says so", async () => {
+  const { run } = await profileTool(() => FIXTURE.result.tools.filter((t) => !t.inputSchema?.properties?.schema_revision));
+  const r = await run({});
+  assert.deepEqual(r.tools, []);
+  assert.match(r.hint, /no workflows/);
+});
+
+test("profile details: agent schema without injected args, full file_args, limits and how_to_call", async () => {
+  const { run } = await profileTool();
+  const r = await run({ tool: "masked_edit" });
+  assert.deepEqual(Object.keys(r), ["tool", "title", "description", "schema", "file_args", "limits", "how_to_call"]);
+  assert.equal(r.tool, "masked_edit");
+  for (const k of ["schema_revision", "api_key", "on_behalf_of"]) {
+    assert.ok(!(k in r.schema.properties), k);
+    assert.ok(!r.schema.required.includes(k), k);
+  }
+  assert.ok(r.schema.properties.source["x-loremax-media"]);
+  const mask = r.file_args.find((a) => a.name === "edit_mask");
+  assert.equal(mask.role, "mask");
+  assert.deepEqual(mask.acceptedFormats, ["png"]);
+  assert.deepEqual(mask.pairedWith, { key: "source", index: 0 });
+  assert.ok(r.limits && typeof r.limits === "object");
+  assert.match(r.how_to_call, /workspace paths/);
+  assert.match(r.how_to_call, /artifacts\//);
+  assert.match(r.how_to_call, /x-loremax-conditions/);
+  // a tool without root limits
+  assert.equal((await run({ tool: "write_text" })).limits, null);
+});
+
+test("profile details: an unknown tool refreshes the catalog once, then lists the names", async () => {
+  const { t, lists } = await profileTool();
+  await assert.rejects(t.handler({ tool: "nope" }, {}), /no such tool "nope" in this profile — tools: write_text, masked_edit, styled_portrait/);
+  assert.equal(lists(), 2);
+});
+
+test("profile details: a tool added since the last read is found by the refresh", async () => {
+  let extra = [];
+  const { run, lists } = await profileTool(() => [...structuredClone(FIXTURE.result.tools), ...extra]);
+  await run({});
+  extra = [{ name: "fresh_tool", title: "Fresh", inputSchema: { type: "object", properties: { prompt: { type: "string" }, schema_revision: { type: "string", enum: ["r9"] } }, required: ["schema_revision", "prompt"] } }];
+  const r = await run({ tool: "fresh_tool" });
+  assert.equal(r.tool, "fresh_tool");
+  assert.deepEqual(r.schema.required, ["prompt"]);
+  assert.equal(lists(), 2);
+});
+
+/** A generation tool whose schema JSON is about `kb` KB, with a long description. */
+const bigTool = (kb, description = "d".repeat(4000)) => {
+  const properties = { schema_revision: { type: "string", enum: ["rbig"] } };
+  for (let i = 0; JSON.stringify(properties).length < kb * 1024; i++)
+    properties[`field_${i}`] = { type: "string", title: `Field ${i}`, description: "x".repeat(200) };
+  return { name: "big_tool", title: "Big", description, inputSchema: { type: "object", properties, required: ["schema_revision"] } };
+};
+
+test("profile details: within the cap the full description and how_to_call are kept", async () => {
+  const { run } = await profileTool(() => [bigTool(4, "d".repeat(1000))]);
+  const r = await run({ tool: "big_tool" });
+  assert.equal(r.description.length, 1000);
+  assert.match(r.how_to_call, /PAID/);
+});
+
+test("profile details: over the cap the prose shrinks first and the schema stays whole", async () => {
+  // schema ~10 KB + 4 KB description + how_to_call: over 14 000 only because of the prose
+  const { raw, run } = await profileTool(() => [bigTool(10)]);
+  const s = await raw({ tool: "big_tool" });
+  assert.ok(s.length <= 14_000, String(s.length));
+  const r = await run({ tool: "big_tool" });
+  assert.ok(r.description.length <= 301);
+  assert.doesNotMatch(r.how_to_call, /PAID/);
+  assert.match(r.how_to_call, /workspace paths/);
+  assert.equal(Object.keys(r.schema.properties).length, Object.keys(bigTool(10).inputSchema.properties).length - 1);
+});
+
+test("profile details: a 64 KB schema is never cut — the cap grows for that reply", async () => {
+  const { raw } = await profileTool(() => [bigTool(64)]);
+  const s = await raw({ tool: "big_tool" });
+  assert.ok(s.length > 64 * 1024);
+  assert.doesNotMatch(s, /…\(truncated\)/);
+  const r = JSON.parse(s);
+  const want = bigTool(64).inputSchema;
+  delete want.properties.schema_revision;
+  want.required = [];
+  assert.deepEqual(r.schema, want);
+  assert.ok(r.description.length <= 301);
 });

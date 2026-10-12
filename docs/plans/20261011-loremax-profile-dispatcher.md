@@ -296,11 +296,12 @@
 - [x] run `npm test` - must pass before task 6
 
 ### Task 6: `loremax_workflows` in profile mode
-- [ ] in profile mode register `loremax_workflows` with schema `{tool?: string, query?: string}` and a mode-specific description (curated profile, free, no price). Without `tool`, list `{tool, title, category, description (first ~200 chars), required, file_args: [{name, mediaType, cardinality}]}`, filtered by `query` over tool, title, category and visualId.
-- [ ] with `tool`, return `{tool, title, description, schema: agentSchema, file_args (full), limits, how_to_call}`. The cap never cuts `schema` (LoreMax publishes schemas up to 64 KB): when the reply exceeds `REPLY_CAP`, shorten `description` and `how_to_call` first and, if still over, raise the cap for this reply to the schema's size plus 2 KB. `how_to_call` explains that file arguments take workspace paths (`artifacts/…` or workdir files) and that conditional rules live in `x-loremax-conditions`. An unknown tool triggers one refresh, then "no such tool" with the list of names.
-- [ ] REST mode keeps the 0.1.0 behavior and description unchanged
-- [ ] write tests in `test/workflows.test.mjs`: profile list, query filter, details, reply cap, unknown-tool refresh, REST mode untouched
-- [ ] run `npm test` - must pass before task 7
+- [x] in profile mode register `loremax_workflows` with schema `{tool?: string, query?: string}` and a mode-specific description (curated profile, free, no price). Without `tool`, list `{tool, title, category, description (first ~200 chars), required, file_args: [{name, mediaType, cardinality}]}`, filtered by `query` over tool, title, category and visualId.
+- [x] with `tool`, return `{tool, title, description, schema: agentSchema, file_args (full), limits, how_to_call}`. The cap never cuts `schema` (LoreMax publishes schemas up to 64 KB): when the reply exceeds `REPLY_CAP`, shorten `description` and `how_to_call` first and, if still over, raise the cap for this reply to the schema's size plus 2 KB. `how_to_call` explains that file arguments take workspace paths (`artifacts/…` or workdir files) and that conditional rules live in `x-loremax-conditions`. An unknown tool triggers one refresh, then "no such tool" with the list of names.
+- [x] REST mode keeps the 0.1.0 behavior and description unchanged
+- [x] write tests in `test/workflows.test.mjs`: profile list, query filter, details, reply cap, unknown-tool refresh, REST mode untouched
+- [x] run `npm test` - must pass before task 7
+- ➕ the list hint and "no such tool" are plain errors/replies like REST mode's (an unknown tool throws); over `REPLY_CAP` the description shrinks to 300 chars and `how_to_call` to a one-line form; the grown cap is measured on the schema as indented in the reply; `loremax_generate` keeps the Task 3 placeholder until Task 8
 
 ### Task 7: Upload workspace files for file arguments
 - [ ] add `uploadFiles(call, tool, args, {deadline})`. For each `fileArgs` entry whose value is a path or an array of paths:

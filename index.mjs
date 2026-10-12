@@ -453,6 +453,48 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
   return { get, refreshAfter };
 }
 
+/** loremax_workflows' profile list: one line per generation tool, filtered by `query` over tool, title, category and visual id. */
+function profileList(c, query) {
+  const q = String(query ?? "").trim().toLowerCase();
+  const tools = [...c.tools.values()]
+    .filter((t) => !q || [t.name, t.title, t.identity.category, t.identity.visualId].some((v) => String(v ?? "").toLowerCase().includes(q)))
+    .map((t) => ({
+      tool: t.name,
+      title: t.title,
+      category: t.identity.category ?? null,
+      description: t.description.slice(0, 200),
+      required: Array.isArray(t.agentSchema.required) ? t.agentSchema.required : [],
+      file_args: t.fileArgs.map(({ name, mediaType, cardinality }) => ({ name, mediaType, cardinality })),
+    }));
+  return {
+    tools,
+    hint: tools.length
+      ? "call loremax_workflows with tool to read its argument schema before loremax_generate"
+      : q ? `no tool matches "${String(query).slice(0, 100)}" — call without query for the full list` : "this profile has no workflows — add some in LoreMax → Organization → MCP",
+  };
+}
+
+const HOW_TO_CALL =
+  "Call loremax_generate with {tool, arguments}: arguments exactly as schema names them (the plugin adds schema_revision and on_behalf_of; never send api_key). File arguments (file_args) take workspace paths — artifacts/… or files in your workdir — and the plugin uploads them; an array file argument takes a list of paths. Conditional rules (fields required, hidden or bounded depending on other fields) live in the schema's x-loremax-conditions; limits caps the media count and total size. A refused call (schema or argument error) is not charged; every accepted call is PAID.";
+const HOW_TO_CALL_SHORT =
+  "loremax_generate {tool, arguments}: file arguments take workspace paths (artifacts/… or workdir files); conditional rules live in x-loremax-conditions.";
+
+/**
+ * loremax_workflows' profile detail. The schema is never cut (LoreMax publishes
+ * schemas up to 64 KB): over REPLY_CAP the prose around it shrinks first, and if
+ * that is not enough the cap for this reply grows to the schema's size plus 2 KB.
+ */
+function profileDetails(t) {
+  const out = (description, how_to_call) =>
+    JSON.stringify({ tool: t.name, title: t.title, description, schema: t.agentSchema, file_args: t.fileArgs, limits: t.limits, how_to_call }, null, 1);
+  let s = out(t.description, HOW_TO_CALL);
+  if (s.length <= REPLY_CAP) return s;
+  s = out(t.description.length > 300 ? `${t.description.slice(0, 300)}…` : t.description, HOW_TO_CALL_SHORT);
+  // the schema as it is indented inside the reply; everything before it is short, so the tail is what a cut can reach
+  const n = Math.max(REPLY_CAP, JSON.stringify({ schema: t.agentSchema }, null, 1).length + 2048);
+  return s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s;
+}
+
 /** What the agent should do with a finished generation's outputs. */
 function outputsHint(artifacts, skipped = []) {
   if (skipped.length)
@@ -780,6 +822,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     const d = (profile && profileTools.get(def.name)) || def;
     ctx.registerTool(profile?.error ? { ...d, handler: async () => { throw profile.error; } } : d);
   };
+  /** The profile's tools/list, shared by every profile-mode tool (null in REST mode or with an invalid profile_url). */
+  const catalog = profile?.path ? createProfileCatalog(lmx, { now, log: ctx.log }) : null;
   if (profile) {
     const notYet = (name) => async () => {
       throw new Error(`loremax ${name}: profile mode is not available in this build yet — clear profile_url to use REST mode`);
@@ -787,12 +831,28 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     profileTools.set("loremax_workflows", {
       name: "loremax_workflows",
       description:
-        "LoreMax workflows curated for this studio (free). Without tool: the list. With tool: that workflow's exact argument schema and file arguments — read it before a paid loremax_generate.",
+        "LoreMax workflows curated for this studio's profile (free). Without tool: the list (tool, title, category, required arguments, file arguments), optionally filtered by query. With tool: that workflow's exact argument schema (JSON Schema), its file arguments and limits — ALWAYS read it before a paid loremax_generate. No price is shown: every loremax_generate call is charged in LoreMax tokens.",
       schema: {
         tool: z.string().optional().describe("tool name from the list; returns its argument schema"),
-        query: z.string().optional().describe("case-insensitive filter over tool, title and category"),
+        query: z.string().optional().describe("case-insensitive filter over tool, title, category and visual id"),
       },
-      handler: notYet("loremax_workflows"),
+      handler: async (args) => {
+        const deadline = now() + MAX_WAIT_S * 1000;
+        const name = String(args.tool ?? "").trim();
+        let c = await catalog.get({ deadline });
+        if (!name) return text(cap(JSON.stringify(profileList(c, args.query), null, 1)));
+        let t = c.tools.get(name);
+        // a tool added to the profile since the last read: one fresh tools/list before giving up
+        if (!t) {
+          c = await catalog.get({ force: true, deadline });
+          t = c.tools.get(name);
+        }
+        if (!t) {
+          const names = [...c.tools.keys()];
+          throw new Error(`loremax_workflows: no such tool "${short(name, 100)}" in this profile — tools: ${names.length ? names.join(", ") : "(none)"}`);
+        }
+        return text(profileDetails(t));
+      },
     });
     profileTools.set("loremax_generate", {
       name: "loremax_generate",
