@@ -236,19 +236,20 @@
 - [x] run `npm test` - must pass before task 3
 
 ### Task 3: `profile_url` config and mode selection
-- [ ] add `profile_url` to `plugin.yaml` `config_schema` (string, optional; full `https://…/api/mcp/s/<publicId>` URL or bare publicId) and a non-undefined default `""` in `cfg` (the acceptance test requires defaults for every key)
-- [ ] add `profilePath()` to `createClient`:
+- [x] add `profile_url` to `plugin.yaml` `config_schema` (string, optional; full `https://…/api/mcp/s/<publicId>` URL or bare publicId) and a non-undefined default `""` in `cfg` (the acceptance test requires defaults for every key)
+- [x] add `profilePath()` to `createClient`:
   - empty → `null` (REST mode);
   - bare publicId (`/^[A-Za-z0-9]{16}$/`) → `/api/mcp/s/<id>` on `baseUrl()`;
   - full URL: must be http(s), on the same origin as `baseUrl()` (otherwise a config error naming both), with path `/api/mcp/s/<16 alnum>`.
-- [ ] decide the mode once at `activate` and log it. For a non-empty invalid `profile_url`, call `ctx.needsConfig` and register the profile-mode tool set, whose handlers throw the config error. Never fall back to REST mode. REST mode stays as in Stage 0.
-- [ ] write tests in `test/config.test.mjs`:
+- [x] decide the mode once at `activate` and log it. For a non-empty invalid `profile_url`, call `ctx.needsConfig` and register the profile-mode tool set, whose handlers throw the config error. Never fall back to REST mode. REST mode stays as in Stage 0.
+- [x] write tests in `test/config.test.mjs`:
   - empty, bare id, full URL;
   - foreign origin, bad path, non-http;
   - an invalid value makes no REST call from any tool and returns the config error.
 
   Include `profile_url` in the yaml/cfg key-list test (`test/acceptance.test.mjs:102-104`).
-- [ ] run `npm test` - must pass before task 4
+- ➕ until Tasks 6 and 8 land, a valid profile's `loremax_workflows` / `loremax_generate` are registered with their profile schemas and descriptions but throw "profile mode is not available in this build yet" (`profileTools` in `activate`); Tasks 6 and 8 replace those handlers
+- [x] run `npm test` - must pass before task 4
 
 ### Task 4: Generalized JSON-RPC client for profile and generic endpoints
 - [ ] add `rpc(path, payload, {timeoutMs, deadline})` to `createClient`:

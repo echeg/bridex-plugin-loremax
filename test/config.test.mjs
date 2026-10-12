@@ -64,3 +64,73 @@ test("key present: activate does not ask for config", async () => {
   await activate(ctx);
   assert.deepEqual(rec.needsConfig, []);
 });
+
+const PID = "AbCdEfGh12345678";
+
+test("profile_url: empty → REST mode, bare publicId and full profile URL → the profile path", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: undefined, MY_PROFILE: PID });
+  const path = (config) => createClient(fakeCtx({ config }).ctx).profilePath();
+  assert.equal(path({}), null);
+  assert.equal(path({ profile_url: "" }), null);
+  assert.equal(path({ profile_url: "   " }), null);
+  assert.equal(path({ profile_url: PID }), `/api/mcp/s/${PID}`);
+  assert.equal(path({ profile_url: ` ${PID} ` }), `/api/mcp/s/${PID}`);
+  assert.equal(path({ profile_url: "${MY_PROFILE}" }), `/api/mcp/s/${PID}`);
+  assert.equal(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}` }), `/api/mcp/s/${PID}`);
+  assert.equal(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}/` }), `/api/mcp/s/${PID}`);
+  assert.equal(path({ base_url: "http://localhost:8788/", profile_url: `http://localhost:8788/api/mcp/s/${PID}` }), `/api/mcp/s/${PID}`);
+});
+
+test("profile_url: foreign origin, bad path, non-http → a config error naming the value", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: undefined });
+  const path = (config) => () => createClient(fakeCtx({ config }).ctx).profilePath();
+  // the key must not go to another host: both origins are named
+  assert.throws(path({ profile_url: `https://evil.example.com/api/mcp/s/${PID}` }), (e) =>
+    e.config === true && /https:\/\/evil\.example\.com/.test(e.message) && /https:\/\/loremax\.ai/.test(e.message));
+  assert.throws(path({ profile_url: `http://loremax.ai/api/mcp/s/${PID}` }), /not on the LoreMax base URL https:\/\/loremax\.ai/);
+  assert.throws(path({ profile_url: "https://loremax.ai/api/mcp" }), /is not a profile URL/);
+  assert.throws(path({ profile_url: "https://loremax.ai/api/mcp/s/short" }), /is not a profile URL/);
+  assert.throws(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}/extra` }), /is not a profile URL/);
+  assert.throws(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}?x=1` }), /is not a profile URL/);
+  assert.throws(path({ profile_url: `ftp://loremax.ai/api/mcp/s/${PID}` }), /must be an http\(s\) URL/);
+  assert.throws(path({ profile_url: "not a url" }), /neither a profile URL nor a publicId/);
+  assert.throws(path({ profile_url: "AbCdEfGh1234567" }), (e) => e.config === true && /profile_url "AbCdEfGh1234567"/.test(e.message));
+});
+
+test("mode: decided once at activate and logged", async () => {
+  restoreEnv = withEnv({ LOREMAX_API_KEY: "lmx_prod_x", LOREMAX_BASE_URL: undefined });
+  const rest = fakeCtx();
+  await activate(rest.ctx);
+  assert.ok(rest.rec.logs.some((l) => /loremax mode: REST/.test(l.msg)));
+  assert.match(rest.rec.tools.get("loremax_workflows").description, /ALWAYS read it before a paid loremax_generate/);
+
+  const prof = fakeCtx({ config: { profile_url: PID } });
+  await activate(prof.ctx);
+  assert.ok(prof.rec.logs.some((l) => l.msg === `loremax mode: profile /api/mcp/s/${PID}`));
+  assert.deepEqual(prof.rec.needsConfig, []);
+  assert.deepEqual([...prof.rec.tools.keys()].sort(), ["loremax_generate", "loremax_result", "loremax_workflows"]);
+  assert.match(prof.rec.tools.get("loremax_workflows").description, /curated/);
+  assert.match(prof.rec.tools.get("loremax_generate").description, /workspace paths/);
+});
+
+test("invalid profile_url: needsConfig, profile tool set, no REST call from any tool — every one throws the config error", async () => {
+  restoreEnv = withEnv({ LOREMAX_API_KEY: "lmx_prod_x", LOREMAX_BASE_URL: undefined });
+  const f = mockFetch([]);
+  restoreFetch = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { profile_url: "https://evil.example.com/api/mcp/s/AbCdEfGh12345678" } });
+  await activate(ctx);
+  assert.equal(rec.needsConfig.length, 1);
+  assert.match(rec.needsConfig[0], /profile_url/);
+  assert.ok(rec.logs.some((l) => /loremax mode: profile \(invalid profile_url/.test(l.msg)));
+  // the profile-mode set, never the REST catalog
+  assert.match(rec.tools.get("loremax_workflows").description, /curated/);
+  const call = { agent: "a", workspace: "w", taskId: "t1" };
+  const args = {
+    loremax_workflows: [{}, { tool: "x" }],
+    loremax_generate: [{ tool: "x", arguments: {} }, { workflow_id: "1", inputs: {} }],
+    loremax_result: [{ generation_id: "42" }, { generation_id: "42", wait_s: 5 }],
+  };
+  for (const [name, list] of Object.entries(args))
+    for (const a of list) await assert.rejects(rec.tools.get(name).handler(a, call), (e) => e.config === true && /is on https:\/\/evil\.example\.com/.test(e.message));
+  assert.equal(f.calls.length, 0);
+});

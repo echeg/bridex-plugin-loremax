@@ -99,7 +99,7 @@ test("plugin.yaml: every config_schema property has a default in createClient", 
   const yaml = fs.readFileSync(new URL("../plugin.yaml", import.meta.url), "utf8");
   const props = yaml.split("\n  properties:\n")[1];
   const keys = [...props.matchAll(/^ {4}([a-z_]+):\s*$/gm)].map((m) => m[1]);
-  assert.deepEqual(keys, ["api_key", "base_url", "default_wait_s", "usd_per_token"]);
+  assert.deepEqual(keys, ["api_key", "base_url", "default_wait_s", "usd_per_token", "profile_url"]);
   const { cfg } = createClient(fakeCtx().ctx);
   for (const k of keys) assert.notEqual(cfg[k], undefined, `${k} has no default`);
   assert.match(yaml, /^name: loremax$/m);

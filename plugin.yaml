@@ -41,3 +41,8 @@ config_schema:
       title: USD per token
       minimum: 0
       description: price of one LoreMax token in USD for the spend charts; empty = record tokens only
+    profile_url:
+      type: string
+      title: MCP profile
+      placeholder: "https://loremax.ai/api/mcp/s/<publicId>"
+      description: Optional. A LoreMax MCP profile (Organization → MCP) — its URL or bare 16-character publicId. Set, agents see only the profile's curated workflows; empty = every workflow of the organization

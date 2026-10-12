@@ -17,6 +17,7 @@ import path from "node:path";
  *         base_url: ${LOREMAX_BASE_URL}   # optional; this is the default (the credential must be set: requires_env)
  *         default_wait_s: 45              # how long loremax_generate waits before handing back (10..50 s)
  *         usd_per_token: 0.001            # optional; tokens → USD for the spend charts
+ *         profile_url: https://loremax.ai/api/mcp/s/<publicId>   # optional; a curated MCP profile (or its bare publicId)
  */
 
 const DEFAULT_BASE_URL = "https://loremax.ai";
@@ -46,6 +47,10 @@ const WATCH_MS = 15_000;
 const GIVE_UP_MS = 6 * 3_600_000;
 /** The dashboard polls stat tiles; LoreMax's balance is read at most once a minute. */
 const BALANCE_TTL_MS = 60_000;
+/** A LoreMax MCP profile's publicId: 16 alphanumerics, served at /api/mcp/s/<publicId>. */
+const PROFILE_ID_RE = /^[A-Za-z0-9]{16}$/;
+const PROFILE_HINT =
+  "set plugins.loremax.config.profile_url to the profile URL from LoreMax → Organization → MCP (https://<LoreMax>/api/mcp/s/<publicId>) or its 16-character publicId — or clear it to use every workflow of the organization";
 const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → LoreMax (or plugins.loremax.config.api_key)";
 
 const EXT_BY_MIME = {
@@ -103,6 +108,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     base_url: "${LOREMAX_BASE_URL}",
     default_wait_s: DEFAULT_WAIT_S,
     usd_per_token: 0,
+    profile_url: "",
     ...(ctx.config ?? {}),
   };
   // an emptied form field arrives as "" — fall back to the managed credential, not to nothing
@@ -117,6 +123,30 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     if (!raw) return DEFAULT_BASE_URL;
     if (!/^https?:\/\/[^/]/i.test(raw)) throw new Error(`LOREMAX_BASE_URL must be an http(s) URL, got "${raw}"`);
     return raw;
+  };
+  /**
+   * profile_url → the profile's path on baseUrl() (`/api/mcp/s/<publicId>`), or
+   * null when empty (REST mode). A value that is neither a publicId nor a profile
+   * URL on the same origin as the key's LoreMax throws a config error: the key
+   * would go to another host, or the agent would get no curated catalog.
+   */
+  const profilePath = () => {
+    const raw = resolveRef(cfg.profile_url ?? "").trim();
+    if (!raw) return null;
+    if (PROFILE_ID_RE.test(raw)) return `/api/mcp/s/${raw}`;
+    const bad = (why) => Object.assign(new Error(`loremax profile_url "${raw.slice(0, 200)}" ${why}: ${PROFILE_HINT}`), { config: true });
+    let u;
+    try {
+      u = new URL(raw);
+    } catch {
+      throw bad("is neither a profile URL nor a publicId");
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw bad("must be an http(s) URL");
+    const base = new URL(baseUrl()).origin;
+    if (u.origin !== base) throw bad(`is on ${u.origin}, not on the LoreMax base URL ${base}`);
+    const m = /^\/api\/mcp\/s\/([A-Za-z0-9]{16})\/?$/.exec(u.pathname);
+    if (!m || u.search || u.hash) throw bad("is not a profile URL (/api/mcp/s/<16-character publicId>)");
+    return `/api/mcp/s/${m[1]}`;
   };
   const usdPerToken = () => {
     const v = Number(cfg.usd_per_token ?? 0);
@@ -241,7 +271,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     }
   }
 
-  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, usdPerToken, defaultWaitS, restJson, mcpCall, check };
+  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, profilePath, usdPerToken, defaultWaitS, restJson, mcpCall, check };
 }
 
 /** What the agent should do with a finished generation's outputs. */
@@ -535,13 +565,71 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
+  /**
+   * The mode, decided once: profile_url set → profile mode (the profile's curated
+   * catalog), else REST mode (every workflow of the organization). An invalid
+   * profile_url is still profile mode — falling back to REST would hand the agent
+   * the whole catalog without the profile's preflight — and every tool throws the
+   * config error before any HTTP.
+   */
+  let profile = null;
+  try {
+    const p = lmx.profilePath();
+    if (p) profile = { path: p };
+  } catch (e) {
+    profile = { error: e };
+    ctx.needsConfig(e.message);
+  }
+  ctx.log.info(
+    profile?.error ? `loremax mode: profile (invalid profile_url — tools refuse until it is fixed)`
+      : profile ? `loremax mode: profile ${profile.path}`
+        : "loremax mode: REST (all workflows of the organization)",
+  );
 
   const { z } = ctx;
   const text = (t) => ({ content: [{ type: "text", text: t }] });
   const cap = (s, n = REPLY_CAP) => (s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s);
   const short = (s, n = 200) => String(s ?? "").slice(0, n);
 
-  ctx.registerTool({
+  /**
+   * Profile mode has its own loremax_workflows / loremax_generate (registered in
+   * place of the REST ones); loremax_result is shared, since both modes poll the
+   * same REST check. An invalid profile_url swaps every handler for the config error.
+   */
+  const profileTools = new Map();
+  const registerTool = (def) => {
+    const d = (profile && profileTools.get(def.name)) || def;
+    ctx.registerTool(profile?.error ? { ...d, handler: async () => { throw profile.error; } } : d);
+  };
+  if (profile) {
+    const notYet = (name) => async () => {
+      throw new Error(`loremax ${name}: profile mode is not available in this build yet — clear profile_url to use REST mode`);
+    };
+    profileTools.set("loremax_workflows", {
+      name: "loremax_workflows",
+      description:
+        "LoreMax workflows curated for this studio (free). Without tool: the list. With tool: that workflow's exact argument schema and file arguments — read it before a paid loremax_generate.",
+      schema: {
+        tool: z.string().optional().describe("tool name from the list; returns its argument schema"),
+        query: z.string().optional().describe("case-insensitive filter over tool, title and category"),
+      },
+      handler: notYet("loremax_workflows"),
+    });
+    profileTools.set("loremax_generate", {
+      name: "loremax_generate",
+      description:
+        `Run a curated LoreMax workflow. PAID per call: read the tool's schema with loremax_workflows first. File arguments take workspace paths (artifacts/… or workdir files). Waits at most ${MAX_WAIT_S}s, then hands back and WAKES you when it lands.`,
+      schema: {
+        tool: z.string().describe("tool name from loremax_workflows"),
+        arguments: z.record(z.string(), z.unknown()).describe("arguments exactly as the tool's schema names them"),
+        wait_s: z.number().int().min(10).max(MAX_WAIT_S).optional().describe(`seconds to wait before handing back (10..${MAX_WAIT_S})`),
+        note: z.string().max(200).optional().describe("short provenance note stored on the outputs (what this is for)"),
+      },
+      handler: notYet("loremax_generate"),
+    });
+  }
+
+  registerTool({
     name: "loremax_workflows",
     description:
       "LoreMax workflows of this organization (free). Without workflow_id: the list (id, visual_id, title, category), optionally filtered by query. With workflow_id: that workflow's input fields (keys, types, options) and its price in LoreMax tokens — ALWAYS read it before a paid loremax_generate: inputs are passed through exactly as these fields name them.",
@@ -739,7 +827,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     settleSubmit(ph, "succeeded", { generationId: got.job.generationId });
   }
 
-  ctx.registerTool({
+  registerTool({
     name: "loremax_generate",
     description:
       `Run a LoreMax workflow (image or video) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands (or poll loremax_result with the generation_id). Never call it again for a submitting reply.`,
@@ -836,7 +924,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     },
   });
 
-  ctx.registerTool({
+  registerTool({
     name: "loremax_result",
     description:
       `Status / result of a LoreMax generation (a generation_id from loremax_generate that ran out of wait time). Completed outputs are saved into artifacts exactly like loremax_generate does; an already finished one returns its saved paths. Free. wait_s keeps polling up to ${MAX_WAIT_S}s.`,
