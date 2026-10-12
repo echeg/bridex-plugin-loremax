@@ -621,3 +621,417 @@ test("older core without wakeAgent: the submission blocks as in 0.1.0, no placeh
   assert.equal(s.placeholders().length, 0);
   assert.equal(s.jobs.length, 1);
 });
+
+// ---------- profile mode ----------
+
+const PROFILE = "AbCdEfGh12345678";
+const FIXTURE = JSON.parse(fs.readFileSync(new URL("./fixtures/profile-tools-list.json", import.meta.url), "utf8"));
+const REV = Object.fromEntries(FIXTURE.result.tools.filter((t) => t.inputSchema?.properties?.schema_revision?.enum).map((t) => [t.name, t.inputSchema.properties.schema_revision.enum[0]]));
+const UPLOAD_TOOLS = new Set(["request_upload_url", "finalize_upload"]);
+
+/** A profile tool refusal the way LoreMax shapes it: `isError` with `{error, errorCode?, details?}`. */
+const refusal = (error, errorCode, details) => ({ isError: { error, ...(errorCode ? { errorCode } : {}), ...(details ? { details } : {}) } });
+
+/**
+ * Profile mode on the fake clock. The profile answers tools/list with `tools()`, the upload
+ * tools with tickets (PUT to r2.test) and `https://cdn.test/<asset>`, and a generation tool
+ * with `gen(name, args)`: plain data, `refusal(…)`, or `{ rpcError }` (a JSON-RPC error); a
+ * throw drops the connection. `onPost(req)` may answer a whole POST, `onPut(req)` a PUT.
+ */
+const profileSetup = async ({ gen = () => ({}), tools = () => structuredClone(FIXTURE.result.tools), onPost, onPut, routes = [], patch, tick = 1_000 } = {}) => {
+  // the upload cache is process-wide: every test starts cold
+  globalThis[Symbol.for("bridex.loremax.uploads")]?.clear();
+  const s = await setup({ config: { profile_url: PROFILE }, tick, patch });
+  let tickets = 0;
+  const reply = async (m) => {
+    const head = { jsonrpc: "2.0", id: m.id };
+    if (m.method === "tools/list") return { ...head, result: { tools: tools() } };
+    const { name, arguments: a } = m.params;
+    let data;
+    if (name === "request_upload_url") {
+      const n = ++tickets;
+      data = { asset_id: `a${n}`, upload_url: `https://r2.test/put/a${n}`, headers: { "Content-Type": a.mime }, expires_at: "2026-10-12T00:15:00Z" };
+    } else if (name === "finalize_upload") {
+      data = { id: a.asset_id, url: `https://cdn.test/${a.asset_id}` };
+    } else {
+      const out = await gen(name, a);
+      if (out?.rpcError) return { ...head, error: out.rpcError };
+      if (out?.isError) return { ...head, result: { content: [{ type: "text", text: JSON.stringify(out.isError) }], isError: true } };
+      data = out;
+    }
+    return { ...head, result: { content: [{ type: "text", text: JSON.stringify(data) }] } };
+  };
+  const f = mockFetch([
+    ["POST", `/api/mcp/s/${PROFILE}`, async (req) => {
+      const own = await onPost?.(req);
+      if (own) return own;
+      return jsonResponse(Array.isArray(req.json) ? await Promise.all(req.json.map(reply)) : await reply(req.json));
+    }],
+    ["PUT", "https://r2.test/put/", async (req) => (await onPut?.(req)) ?? new Response(null, { status: 200 })],
+    ...routes,
+  ]);
+  restore = f.restore;
+  const work = s.ctx.paths.workspaceWorkdir(CALL.workspace);
+  /** A file in the workdir. */
+  const write = (rel, content) => {
+    fs.mkdirSync(path.dirname(path.join(work, rel)), { recursive: true });
+    fs.writeFileSync(path.join(work, rel), content);
+    return rel;
+  };
+  const msgs = () => f.calls.filter((c) => c.method === "POST" && c.url.includes("/api/mcp/s/")).flatMap((c) => (Array.isArray(c.json) ? c.json : [c.json]));
+  /** The generation tools/call messages sent (uploads and tools/list aside). */
+  const genCalls = () => msgs().filter((m) => m.method === "tools/call" && !UPLOAD_TOOLS.has(m.params.name)).map((m) => m.params);
+  const lists = () => msgs().filter((m) => m.method === "tools/list").length;
+  return { ...s, f, write, msgs, genCalls, lists };
+};
+
+test("profile: loremax_generate is registered with {tool, arguments, wait_s, note} and a paid, workspace-path description", async () => {
+  const s = await profileSetup();
+  assert.deepEqual(Object.keys(s.tool.schema), ["tool", "arguments", "wait_s", "note"]);
+  assert.match(s.tool.description, /PAID/);
+  assert.match(s.tool.description, /loremax_workflows first/);
+  assert.match(s.tool.description, /workspace paths/);
+  assert.match(s.tool.description, /Never call it again for a submitting reply/);
+  assert.doesNotMatch(s.tool.description, /workflow_id/);
+});
+
+test("profile happy path: uploads, injected revision and on_behalf_of, sync outputs saved with provenance and usage", async () => {
+  const s = await profileSetup({
+    gen: () => ({ generationId: 901, status: "completed", tokensCost: 7, async: false, originalUrls: [`${CDN}/edit.png`], content_type: "image" }),
+    routes: [["GET", `${CDN}/edit.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })]],
+  });
+  s.write("src.png", "source bytes");
+  s.put("t0/mask.png", "mask bytes");
+  const reply = await s.run({
+    tool: "masked_edit",
+    // the injected arguments are the plugin's: what the agent sends for them is dropped
+    arguments: { text: "fix the sky", source: "src.png", edit_mask: "artifacts/t0/mask.png", api_key: "lmx_prod_other", schema_revision: "stale", on_behalf_of: "me" },
+    note: "sky fix",
+  });
+
+  assert.equal(s.genCalls().length, 1);
+  const g = s.genCalls()[0];
+  assert.equal(g.name, "masked_edit");
+  assert.deepEqual(g.arguments, {
+    text: "fix the sky",
+    source: "https://cdn.test/a1",
+    edit_mask: "https://cdn.test/a2",
+    schema_revision: REV.masked_edit,
+    on_behalf_of: "bridex:studio:illustrator",
+  });
+  // one Bearer key everywhere, and only the profile path: no REST execute in profile mode
+  assert.ok(s.f.calls.filter((c) => c.method === "POST").every((c) => c.url === `${BASE}/api/mcp/s/${PROFILE}` && c.headers.authorization === "Bearer lmx_prod_k"));
+  assert.ok(s.msgs().filter((m) => UPLOAD_TOOLS.has(m.params?.name)).every((m) => !("on_behalf_of" in m.params.arguments)));
+
+  assert.deepEqual(reply, {
+    generation_id: "901",
+    status: "completed",
+    workflow: "masked-edit",
+    artifacts: ["task-9/masked-edit-901.png"],
+    tokens_cost: 7,
+    hint: "reference outputs as [media: artifacts/<path>]",
+  });
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/masked-edit-901.png"), "utf8"), "PNG");
+  const gen = s.rec.annotate[0].meta.generation;
+  assert.equal(gen.provider, "LoreMax");
+  assert.equal(gen.workflow, "masked-edit");
+  assert.equal(gen.externalId, "901");
+  // the agent's arguments with workspace paths (never the uploaded URLs), the referenced paths, tool and profile
+  assert.deepEqual(gen.params, {
+    text: "fix the sky",
+    source: "src.png",
+    edit_mask: "artifacts/t0/mask.png",
+    tool: "masked_edit",
+    profile: PROFILE,
+    image_urls: ["src.png", "artifacts/t0/mask.png"],
+  });
+  assert.equal(s.rec.annotate[0].meta.description, "LoreMax masked-edit · generation 901 · sky fix");
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.usage[0].model, "masked-edit");
+  assert.equal(s.rec.usage[0].ref, "901");
+  assert.equal(s.rec.usage[0].units, 7);
+  // finished from the reply: no REST check, no generation row; the placeholder is settled
+  assert.equal(s.f.calls.some((c) => c.url.includes("/check")), false);
+  assert.equal(s.gens().length, 0);
+  assert.equal(s.placeholders()[0].status, "succeeded");
+  assert.deepEqual(s.placeholders()[0].params, { submitting: true, mode: "profile", tool: "masked_edit", note: "sky fix" });
+  assert.equal(s.ctx.jobs.pending().length, 0);
+});
+
+test("profile: on_behalf_of is reduced to LoreMax's characters, trimmed and capped at 128", async () => {
+  const s = await profileSetup({ gen: () => ({ generationId: 5, status: "completed", tokensCost: 1, textContent: "ok" }) });
+  await s.run({ tool: "write_text", arguments: { text: "hi" } }, { ...CALL, workspace: "stüdio/ü", agent: `${"a<b>".repeat(60)}  ` });
+  const obo = s.genCalls()[0].arguments.on_behalf_of;
+  assert.match(obo, /^[A-Za-z0-9._:@ -]+$/);
+  assert.ok(obo.startsWith("bridex:stdio:abab"));
+  assert.ok(obo.length <= 128);
+  assert.equal(obo, obo.trim());
+});
+
+test("profile: a completed Text reply is saved as .md from the reply, no REST check", async () => {
+  const s = await profileSetup({ gen: () => ({ generationId: 77, status: "completed", tokensCost: 2, async: false, text_content: "Once upon a time." }) });
+  const r = await s.run({ tool: "write_text", arguments: { text: "a fairy tale" } });
+  assert.deepEqual(r.artifacts, ["task-9/write-text-77.md"]);
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/write-text-77.md"), "utf8"), "Once upon a time.");
+  assert.equal(s.f.calls.some((c) => c.url.includes("/check")), false);
+  assert.equal(s.rec.usage[0].model, "write_text");
+});
+
+test("profile: a pending reply, or a completed pipeline reply without URLs, is tracked with profile params and polled via the REST check", async () => {
+  for (const sub of [
+    { generationId: 501, status: "pending", tokensCost: 12, async: true, jobId: "j" },
+    { generationId: 501, status: "completed", tokensCost: 12, async: true },
+  ]) {
+    let checks = 0;
+    const s = await profileSetup({
+      gen: () => sub,
+      routes: [
+        ["POST", "/api/v2/generations/501/check", () => (++checks === 1 ? { status: "checking" } : DONE)],
+        ["GET", `${CDN}/out.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+      ],
+    });
+    s.write("a.png", "A");
+    const r = await s.run({ tool: "styled_portrait", arguments: { style: "noir", references: ["a.png"] }, note: "hero" });
+    assert.equal(r.status, "completed");
+    assert.equal(checks, 2);
+    assert.deepEqual(r.artifacts, ["task-9/styled-portrait-501.png"]);
+    const row = s.gens()[0];
+    assert.equal(row.externalId, "501");
+    assert.equal(row.model, "styled-portrait");
+    assert.equal(row.label, "hero · 12 tk");
+    // restart-safe: the workspace paths, never the uploaded URLs
+    assert.deepEqual(row.params, {
+      mode: "profile",
+      tool: "styled_portrait",
+      arguments: { style: "noir", references: ["a.png"] },
+      references: ["a.png"],
+      tokensCost: 12,
+      note: "hero",
+      identity: { workflowId: 12, visualId: "styled-portrait", title: "Styled portrait", category: "Portraits", contentType: "image", pipeline: true },
+      profile: PROFILE,
+    });
+    assert.equal(row.status, "succeeded");
+    assert.equal(s.rec.usage.length, 1);
+    assert.equal(s.rec.usage[0].ref, "501");
+    restore();
+  }
+});
+
+/** After a call that produced no generation: nothing billed, nothing tracked, the placeholder settled failed. */
+const nothingCharged = (s) => {
+  assert.equal(s.rec.usage.length, 0);
+  assert.equal(s.gens().length, 0);
+  assert.equal(s.ctx.jobs.pending().length, 0);
+  assert.ok(s.placeholders().every((p) => p.status === "failed"));
+};
+
+test("profile preflight refusals: not charged, issues and the tool's schema in the reply", async () => {
+  for (const code of ["INVALID_WORKFLOW_INPUT", "MEDIA_INPUT_INVALID"]) {
+    const issues = [{ path: ["text"], message: "Required" }];
+    const s = await profileSetup({ gen: () => refusal("Invalid workflow input", code, { issues }) });
+    const r = await s.run({ tool: "write_text", arguments: {} });
+    assert.equal(r.status, "rejected");
+    assert.equal(r.charged, false);
+    assert.equal(r.error_code, code);
+    assert.deepEqual(r.issues, issues);
+    assert.deepEqual(Object.keys(r.schema.properties), ["text"]);
+    assert.match(r.hint, /not charged/);
+    // the catalog was fine: no extra tools/list
+    assert.equal(s.lists(), 1);
+    nothingCharged(s);
+    restore();
+  }
+});
+
+test("profile SCHEMA_REVISION_MISMATCH: the catalog is reread and the fresh schema returned, never retried", async () => {
+  let version = 0;
+  const tools = () => {
+    const list = structuredClone(FIXTURE.result.tools);
+    if (version > 0) {
+      const t = list.find((x) => x.name === "write_text");
+      t.inputSchema.properties.schema_revision.enum = ["rev-new"];
+      t.inputSchema.properties.tone = { type: "string", enum: ["dry", "warm"] };
+      t.inputSchema.required.push("tone");
+    }
+    return list;
+  };
+  const s = await profileSetup({
+    tools,
+    gen: (name, a) => {
+      if (a.schema_revision === "rev-new") return { generationId: 9, status: "completed", tokensCost: 1, textContent: "ok" };
+      version = 1;
+      return refusal("schema_revision does not match", "SCHEMA_REVISION_MISMATCH");
+    },
+  });
+  const r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+  assert.equal(r.status, "rejected");
+  assert.equal(r.charged, false);
+  assert.equal(r.error_code, "SCHEMA_REVISION_MISMATCH");
+  assert.ok(r.schema.properties.tone);
+  assert.ok(r.schema.required.includes("tone"));
+  assert.match(r.hint, /schema changed/);
+  assert.equal(s.lists(), 2);
+  assert.equal(s.genCalls().length, 1);
+  nothingCharged(s);
+  // the agent's next call goes out with the new revision from the refreshed cache
+  const again = await s.run({ tool: "write_text", arguments: { text: "hi", tone: "dry" } });
+  assert.equal(again.status, "completed");
+  assert.equal(s.genCalls()[1].arguments.schema_revision, "rev-new");
+  assert.equal(s.lists(), 2);
+});
+
+test("profile WORKFLOW_UNAVAILABLE, -32601 and an unknown name: refreshed, 'unavailable' with the current tool list", async () => {
+  for (const [gen, code] of [
+    [() => refusal("workflow is not published", "WORKFLOW_UNAVAILABLE"), "WORKFLOW_UNAVAILABLE"],
+    [() => ({ rpcError: { code: -32601, message: "Tool not found" } }), "TOOL_NOT_FOUND"],
+  ]) {
+    const s = await profileSetup({ gen });
+    const r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+    assert.equal(r.status, "rejected");
+    assert.equal(r.charged, false);
+    assert.equal(r.error_code, code);
+    assert.deepEqual(r.tools, ["write_text", "masked_edit", "styled_portrait"]);
+    assert.match(r.hint, /unavailable/);
+    assert.equal(s.lists(), 2);
+    nothingCharged(s);
+    restore();
+  }
+  // a name the profile never had: one refresh, then the same reply, and no paid call at all
+  const s = await profileSetup();
+  const r = await s.run({ tool: "nope", arguments: {} });
+  assert.equal(r.status, "rejected");
+  assert.equal(r.error_code, "TOOL_NOT_FOUND");
+  assert.deepEqual(r.tools, ["write_text", "masked_edit", "styled_portrait"]);
+  assert.equal(s.lists(), 2);
+  assert.equal(s.genCalls().length, 0);
+  nothingCharged(s);
+});
+
+test("profile 404 and PROFILE_ORGANIZATION_MISMATCH: a config error with the three causes", async () => {
+  const s = await profileSetup({ onPost: () => new Response("not found", { status: 404 }) });
+  await assert.rejects(s.run({ tool: "write_text", arguments: { text: "hi" } }), (e) => e.config === true && e.code === "PROFILE_NOT_FOUND" && /unknown, disabled in LoreMax, or LOREMAX_API_KEY belongs to another organization/.test(e.message));
+  nothingCharged(s);
+  restore();
+
+  const s2 = await profileSetup({ gen: () => refusal("profile belongs to another organization", "PROFILE_ORGANIZATION_MISMATCH") });
+  await assert.rejects(s2.run({ tool: "write_text", arguments: { text: "hi" } }), (e) => e.config === true && /another organization/.test(e.message) && /profile_url/.test(e.message));
+  nothingCharged(s2);
+});
+
+test("profile INSUFFICIENT_TOKENS: the out-of-funds card and a failed, not-charged reply", async () => {
+  const s = await profileSetup({ gen: () => refusal("Insufficient tokens", "INSUFFICIENT_TOKENS", { requiredTokens: 40 }) });
+  const r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+  assert.equal(r.status, "failed");
+  assert.equal(r.charged, false);
+  assert.equal(r.error_code, "INSUFFICIENT_TOKENS");
+  assert.equal(r.required_tokens, 40);
+  assert.match(r.hint, /top it up/);
+  assert.equal(s.rec.outOfFunds.length, 1);
+  nothingCharged(s);
+});
+
+test("profile GENERATION_FAILED, an uncoded isError and a 'failed' success reply: failed with the generation id, never tracked", async () => {
+  for (const [gen, code, gid] of [
+    [() => refusal("render crashed", "GENERATION_FAILED", { generationId: 640 }), "GENERATION_FAILED", "640"],
+    [() => refusal("something broke"), undefined, undefined],
+    [() => ({ generationId: 641, status: "failed", error: "nsfw filter", tokensCost: 0 }), "GENERATION_FAILED", "641"],
+  ]) {
+    const s = await profileSetup({ gen });
+    const r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+    assert.equal(r.status, "failed");
+    assert.equal(r.error_code, code);
+    assert.equal(r.generation_id, gid);
+    assert.match(r.hint, /refunds failed runs/);
+    assert.match(r.hint, /do not retry blindly/);
+    nothingCharged(s);
+    restore();
+  }
+});
+
+test("profile: no reply to the paid call says it may have been charged", async () => {
+  const s = await profileSetup({ gen: () => { throw new TypeError("fetch failed"); } });
+  await assert.rejects(s.run({ tool: "write_text", arguments: { text: "hi" } }), /got no reply \(fetch failed\).*may have accepted and charged/);
+  assert.equal(s.rec.usage.length, 0);
+  assert.equal(s.placeholders()[0].status, "failed");
+});
+
+test("profile: a refused upload aborts before the paid call with 'nothing was charged'", async () => {
+  const s = await profileSetup({ onPut: () => new Response("denied", { status: 403 }) });
+  s.write("src.png", "S");
+  await assert.rejects(s.run({ tool: "masked_edit", arguments: { text: "t", source: "src.png" } }), /upload of src\.png failed \(HTTP 403\).*nothing was charged/);
+  assert.equal(s.genCalls().length, 0);
+  nothingCharged(s);
+});
+
+test("profile: slow uploads reply submitting; the paid call runs after, and the agent is woken with the files", async () => {
+  const gate = held();
+  const s = await profileSetup({
+    onPut: async () => {
+      await gate.until;
+    },
+    gen: () => ({ generationId: 902, status: "completed", tokensCost: 3, originalUrls: [`${CDN}/late.png`] }),
+    routes: [["GET", `${CDN}/late.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })]],
+  });
+  s.write("src.png", "S");
+  const replying = s.run({ tool: "masked_edit", arguments: { text: "t", source: "src.png" }, note: "late" });
+  await s.time.expire();
+  const r = await replying;
+  assert.equal(r.status, "submitting");
+  assert.equal(r.tool, "masked_edit");
+  assert.match(r.hint, /do NOT call loremax_generate again/);
+  // still uploading: nothing paid yet
+  assert.equal(s.genCalls().length, 0);
+  assert.equal(s.ctx.jobs.pending().length, 1);
+
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the wake");
+  assert.equal(s.genCalls().length, 1);
+  assert.match(s.rec.wakes[0].prompt, /^LoreMax masked_edit \(late\) — generation 902 finished: artifacts\/task-9\/masked-edit-902\.png/);
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.placeholders()[0].status, "succeeded");
+  assert.equal(s.ctx.jobs.pending().length, 0);
+});
+
+test("profile: a refusal after submitting wakes with the not-charged reason", async () => {
+  const gate = held();
+  const s = await profileSetup({
+    onPut: async () => {
+      await gate.until;
+    },
+    gen: () => refusal("source is too small", "MEDIA_INPUT_INVALID", { issues: [{ path: ["source"], message: "min 64px" }] }),
+  });
+  s.write("src.png", "S");
+  const replying = s.run({ tool: "masked_edit", arguments: { text: "t", source: "src.png" } });
+  await s.time.expire();
+  assert.equal((await replying).status, "submitting");
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the wake");
+  assert.match(s.rec.wakes[0].prompt, /was refused before it ran \(not charged\): .*source is too small — issues: .*min 64px/);
+  nothingCharged(s);
+});
+
+test("older core: uploads that leave under 15 s abort before the paid call; a retry reuses the cached upload", async () => {
+  let slow = true;
+  const s = await profileSetup({
+    patch: (ctx) => delete ctx.wakeAgent,
+    onPut: () => {
+      // the upload ate 40 s of the 50 s the call may last
+      if (slow) s.clock.t += 40_000;
+    },
+    gen: () => ({ generationId: 903, status: "completed", tokensCost: 3, originalUrls: [`${CDN}/ok.png`] }),
+    routes: [["GET", `${CDN}/ok.png`, () => new Response("PNG")]],
+  });
+  s.write("src.png", "S");
+  const args = { tool: "masked_edit", arguments: { text: "t", source: "src.png" } };
+  await assert.rejects(s.run(args), (e) => e.charged === false && /nothing was charged; uploads are cached — call loremax_generate again/.test(e.message));
+  assert.equal(s.genCalls().length, 0);
+  assert.equal(s.time.races.length, 0);
+  assert.equal(s.placeholders().length, 0);
+
+  slow = false;
+  const puts = s.f.calls.filter((c) => c.method === "PUT").length;
+  const r = await s.run(args);
+  assert.equal(r.status, "completed");
+  assert.equal(s.f.calls.filter((c) => c.method === "PUT").length, puts);
+  assert.equal(s.genCalls()[0].arguments.source, "https://cdn.test/a1");
+});

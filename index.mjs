@@ -40,6 +40,12 @@ const POLL_MS = 3_000;
 const DEFAULT_WAIT_S = 45;
 const MAX_WAIT_S = 50;
 const FINISH_RESERVE_MS = 10_000;
+/**
+ * A core that cannot detach blocks on the paid call: it starts only with this
+ * much of the call's time left after the profile's uploads (a short paid call
+ * plus a first check).
+ */
+const PAID_CALL_RESERVE_MS = 15_000;
 /** A synchronous reply without outputs is looked up (Text workflows): each read gets this long. */
 const LOOKUP_TIMEOUT_MS = 10_000;
 /** The reboot-proof watcher's pass over pending jobs, and when it gives a generation up. */
@@ -49,6 +55,7 @@ const GIVE_UP_MS = 6 * 3_600_000;
 const BALANCE_TTL_MS = 60_000;
 /** A LoreMax MCP profile's publicId: 16 alphanumerics, served at /api/mcp/s/<publicId>. */
 const PROFILE_ID_RE = /^[A-Za-z0-9]{16}$/;
+const PROFILE_CAUSES = "the profile is unknown, disabled in LoreMax, or LOREMAX_API_KEY belongs to another organization";
 const PROFILE_HINT =
   "set plugins.loremax.config.profile_url to the profile URL from LoreMax → Organization → MCP (https://<LoreMax>/api/mcp/s/<publicId>) or its 16-character publicId — or clear it to use every workflow of the organization";
 /** Profile errors raised before any debit: the call was refused, nothing was charged. */
@@ -104,6 +111,28 @@ function retryAfterMs(header) {
 /** An Error carrying the HTTP status and body, so callers can tell a refused key from a dead generation. */
 function httpError(message, status, body) {
   return Object.assign(new Error(message), { status, body });
+}
+
+/**
+ * A paid request that ended without LoreMax's answer — a timeout, a dropped
+ * connection (fetch's TypeError) or a gateway 5xx without LoreMax's own JSON body
+ * (an edge 502/524 cutting a long sync render) — leaves the outcome unknown:
+ * LoreMax may already have taken the tokens and be rendering. → the
+ * may-have-been-charged error (`ambiguous`), or `e` itself for a definite outcome.
+ */
+function unanswered(e, what) {
+  let body;
+  try {
+    body = JSON.parse(e?.body ?? "");
+  } catch {}
+  const unknown = e?.status != null
+    ? e.status >= 500 && (body == null || typeof body !== "object")
+    : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
+  if (!unknown) return e;
+  return Object.assign(
+    new Error(`loremax ${what} got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`),
+    { ambiguous: true },
+  );
 }
 
 /**
@@ -243,7 +272,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     }, label, opts);
     if (res.status === 404 && path.startsWith("/api/mcp/s/")) {
       throw Object.assign(
-        new Error(`loremax ${label}: profile not found (HTTP 404) — the profile is unknown, disabled in LoreMax, or LOREMAX_API_KEY belongs to another organization; ${PROFILE_HINT}`),
+        new Error(`loremax ${label}: profile not found (HTTP 404) — ${PROFILE_CAUSES}; ${PROFILE_HINT}`),
         { status: 404, body, code: "PROFILE_NOT_FOUND", retryable: false, charged: false },
       );
     }
@@ -290,6 +319,8 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
       if (/insufficient tokens/i.test(errText) || code === "INSUFFICIENT_TOKENS") outOfFunds(errText);
       throw Object.assign(new Error(`loremax ${name}: ${errText}`.slice(0, 500)), {
         code,
+        // LoreMax answered and refused or failed the call: a definite outcome, not a lost reply
+        toolError: true,
         ...(out?.details != null ? { details: out.details } : {}),
         ...(PREFLIGHT_CODES.has(code) ? { charged: false } : {}),
       });
@@ -493,6 +524,29 @@ function profileDetails(t) {
   // the schema as it is indented inside the reply; everything before it is short, so the tail is what a cut can reach
   const n = Math.max(REPLY_CAP, JSON.stringify({ schema: t.agentSchema }, null, 1).length + 2048);
   return s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s;
+}
+
+/**
+ * Who a profile generation is for, as LoreMax records it: `bridex:<workspace>:<agent>`
+ * in the characters LoreMax allows, at most 128.
+ */
+const onBehalfOf = (call) => `bridex:${call.workspace ?? ""}:${call.agent ?? ""}`.replace(/[^A-Za-z0-9._:@ -]/g, "").trim().slice(0, 128).trim();
+
+/** A profile job's params (kept on its row) → the provenance params: the agent's arguments plus tool and profile. */
+const profileInputs = (p) => ({ ...(isObj(p.arguments) ? p.arguments : {}), tool: p.tool, ...(p.profile ? { profile: p.profile } : {}) });
+
+/**
+ * A profile tool's reply → the outputs to save, or null when there is nothing
+ * in hand yet (pending, or a pipeline whose final read failed): that one is polled.
+ */
+function replyOutputs(sub) {
+  if (sub?.status !== "completed") return null;
+  let urls = urlsOf(sub);
+  // a single-output reply may name only result_url
+  if (!urls.length && typeof sub.result_url === "string" && sub.result_url) urls = [sub.result_url];
+  const textContent = textOf(sub);
+  if (!urls.length && !textContent) return null;
+  return { originalUrls: urls, previewUrls: [], externalUrls: [], contentTypes: Array.isArray(sub.contentTypes) ? sub.contentTypes : [], textContent };
 }
 
 /** What the agent should do with a finished generation's outputs. */
@@ -1021,7 +1075,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       workflow: row?.model ?? "",
       // a submission placeholder's params describe no generation
       ...(p && typeof p === "object" && !p.submitting
-        ? { inputs: p.inputs ?? {}, references: p.references ?? [], tokensCost: Number(p.tokensCost) || 0, note: p.note ?? "" }
+        ? { inputs: p.mode === "profile" ? profileInputs(p) : p.inputs ?? {}, references: p.references ?? [], tokensCost: Number(p.tokensCost) || 0, note: p.note ?? "" }
         : fromJobLabel(row?.label)),
     };
   };
@@ -1073,10 +1127,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   };
   /** The profile's tools/list, shared by every profile-mode tool (null in REST mode or with an invalid profile_url). */
   const catalog = profile?.path ? createProfileCatalog(lmx, { now, log: ctx.log }) : null;
+  const uploader = profile?.path ? createUploader(ctx, lmx, outputs, { now }) : null;
   if (profile) {
-    const notYet = (name) => async () => {
-      throw new Error(`loremax ${name}: profile mode is not available in this build yet — clear profile_url to use REST mode`);
-    };
     profileTools.set("loremax_workflows", {
       name: "loremax_workflows",
       description:
@@ -1106,14 +1158,52 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     profileTools.set("loremax_generate", {
       name: "loremax_generate",
       description:
-        `Run a curated LoreMax workflow. PAID per call: read the tool's schema with loremax_workflows first. File arguments take workspace paths (artifacts/… or workdir files). Waits at most ${MAX_WAIT_S}s, then hands back and WAKES you when it lands.`,
+        `Run a curated LoreMax workflow. PAID per call: read the tool's schema with loremax_workflows first and pass arguments exactly as it names them. File arguments take workspace paths (artifacts/… or workdir files); the plugin uploads them. Outputs are saved into this task's artifacts with provenance. A refused call (status rejected: bad arguments, changed schema, unavailable tool) is not charged — fix and call again. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands. Never call it again for a submitting reply.`,
       schema: {
         tool: z.string().describe("tool name from loremax_workflows"),
         arguments: z.record(z.string(), z.unknown()).describe("arguments exactly as the tool's schema names them"),
         wait_s: z.number().int().min(10).max(MAX_WAIT_S).optional().describe(`seconds to wait before handing back (10..${MAX_WAIT_S})`),
         note: z.string().max(200).optional().describe("short provenance note stored on the outputs (what this is for)"),
       },
-      handler: notYet("loremax_generate"),
+      handler: async (args, call) => {
+        // the budget covers the whole call from here: catalog, uploads, submission, polling and saving
+        const start = now();
+        const waitS = waitSeconds(args.wait_s, 10, lmx.defaultWaitS());
+        const until = start + waitS * 1000;
+        const deadline = start + MAX_WAIT_S * 1000;
+        const name = String(args.tool ?? "").trim();
+        if (!name) throw new Error("tool is required — pick one from loremax_workflows");
+        if (args.arguments != null && !isObj(args.arguments)) throw new Error("arguments must be an object, named exactly as the tool's schema from loremax_workflows");
+        const agentArgs = { ...(args.arguments ?? {}) };
+        // the plugin fills these in itself (an api_key would also bypass the configured key)
+        for (const k of INJECTED_ARGS) delete agentArgs[k];
+        const note = String(args.note ?? (typeof agentArgs.prompt === "string" ? agentArgs.prompt.slice(0, 120) : ""));
+        const base = { args: agentArgs, note };
+
+        // the whole sequence is the detached unit: a late answer (even a refused upload) still comes as a wake
+        const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "profile", tool: name, note }) : null;
+        const submission = submitProfile(call, name, agentArgs, ph ? undefined : deadline).catch((error) => ({ error }));
+        const first = await raceBudget(ph, submission, until);
+        if (!first) {
+          submission
+            .then((o) => settleLate(ph, o, (x) => acceptedProfile(call, x, base), (e) => profileLate(ph, e, name)))
+            .catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+          return text(JSON.stringify({
+            status: "submitting",
+            tool: name,
+            hint: "submitted, still waiting for LoreMax — do NOT call loremax_generate again; end your turn, you will be WOKEN with the result",
+          }, null, 1));
+        }
+        let got;
+        try {
+          if (first.error) throw first.error;
+          got = acceptedProfile(call, first, base);
+        } catch (e) {
+          if (ph) settleSubmit(ph, "failed", { error: e?.message ?? e });
+          return text(JSON.stringify(await profileFailure(e, name, { deadline }), null, 1));
+        }
+        return text(JSON.stringify(await landed(call, ph, got, { until, deadline, waitS }), null, 1));
+      },
     });
   }
 
@@ -1159,6 +1249,164 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     },
   });
 
+  /** A generation tool of the profile by name; a name missing from the catalog gets one fresh tools/list first. */
+  async function profileToolNamed(name, deadline) {
+    let c = await catalog.get({ deadline });
+    if (!c.tools.has(name)) c = await catalog.get({ force: true, deadline });
+    const t = c.tools.get(name);
+    if (!t) throw Object.assign(new Error(`loremax_generate: no such tool "${short(name, 100)}" in this profile`), { code: "TOOL_NOT_FOUND", charged: false, refreshed: true });
+    return t;
+  }
+
+  /**
+   * The profile sequence up to LoreMax's answer: the tool from the catalog, its
+   * file arguments uploaded, then the paid call with schema_revision and
+   * on_behalf_of → { sub, tool, references }. `deadline` (blocking cores only)
+   * bounds what comes before the paid call, which then starts only with
+   * PAID_CALL_RESERVE_MS left; a detached unit always gets its answer to the agent.
+   */
+  async function submitProfile(call, name, agentArgs, deadline) {
+    let t;
+    let up;
+    try {
+      t = await profileToolNamed(name, deadline);
+      up = await uploader.uploadFiles(call, t, agentArgs, { deadline });
+      if (deadline != null && deadline - now() < PAID_CALL_RESERVE_MS) throw deadlineError("loremax_generate");
+    } catch (e) {
+      if (e?.deadline)
+        throw Object.assign(new Error("loremax_generate ran out of time before the paid call — nothing was charged; uploads are cached — call loremax_generate again"), { charged: false });
+      // a catalog read that failed: the generation was never sent
+      if (!e?.code && !/nothing was charged/.test(e?.message ?? "")) e.message = `${e?.message ?? e} — nothing was charged`;
+      throw e;
+    }
+    let sub;
+    try {
+      // the paid call is never cut short: aborting it would not stop LoreMax
+      sub = await lmx.toolCall(profile.path, name, { ...up.arguments, schema_revision: t.revision, on_behalf_of: onBehalfOf(call) }, { timeoutMs: 600_000 });
+    } catch (e) {
+      throw unanswered(e, name);
+    }
+    return { sub, tool: t, references: up.references };
+  }
+
+  /** A profile tool's reply → the job, plus the outputs when they came with it (null: poll the REST check). */
+  function acceptedProfile(call, { sub, tool: t, references }, { args, note }) {
+    if (sub?.status === "failed")
+      throw Object.assign(new Error(`loremax ${t.name}: ${sub.error ?? "the generation failed"}`.slice(0, 500)), { code: "GENERATION_FAILED", toolError: true, details: { generationId: sub.generationId } });
+    if (sub?.generationId == null) throw new Error(`loremax ${t.name} returned no generationId: ${JSON.stringify(sub).slice(0, 300)}`);
+    const generationId = String(sub.generationId);
+    const tokensCost = Number(sub.tokensCost) || 0;
+    const workflow = String(t.identity.visualId ?? t.identity.title ?? t.name);
+    ctx.log.info(`@${call.agent} loremax ${t.name} → generation ${generationId} (${tokensCost} tk)`);
+    // the workspace paths, never the uploaded URLs: provenance points at the studio's own files
+    const p = { mode: "profile", tool: t.name, arguments: args, profile: profile.path.split("/").pop() };
+    const job = { generationId, workspace: call.workspace, workflow, ...p, inputs: profileInputs(p), references, tokensCost, note, identity: t.identity };
+    return { job, result: replyOutputs(sub) };
+  }
+
+  /**
+   * A profile call that did not produce a generation → the reply for the agent:
+   * `rejected` (refused before any debit: fix and call again) or `failed`. A
+   * config error, an unknown outcome (may have been charged) and a refused
+   * upload are thrown as they are. The catalog is reread where the error says
+   * it changed, so the reply carries the current schema or tool list.
+   */
+  async function profileFailure(e, name, { deadline } = {}) {
+    const code = e?.code;
+    const error = String(e?.message ?? e);
+    let c;
+    const current = async () => {
+      if (c !== undefined) return c;
+      if (!e?.refreshed) catalog.refreshAfter(e);
+      try {
+        c = await catalog.get({ deadline });
+      } catch (x) {
+        ctx.log.warn(`loremax ${profile.path} tools/list: ${x?.message ?? x}`);
+        c = null;
+      }
+      return c;
+    };
+    if (code === "PROFILE_NOT_FOUND") throw Object.assign(e, { config: true });
+    if (code === "PROFILE_ORGANIZATION_MISMATCH")
+      throw Object.assign(new Error(`${error} — ${PROFILE_CAUSES}; ${PROFILE_HINT}`), { code, config: true, charged: false });
+    if (code === "INVALID_WORKFLOW_INPUT" || code === "MEDIA_INPUT_INVALID") {
+      const t = (await current())?.tools.get(name);
+      const issues = Array.isArray(e.details?.issues) ? e.details.issues : null;
+      return {
+        status: "rejected",
+        charged: false,
+        error_code: code,
+        error,
+        ...(issues ? { issues } : {}),
+        ...(t ? { schema: t.agentSchema } : {}),
+        hint: "not charged — fix the arguments to match the schema, then call loremax_generate again",
+      };
+    }
+    if (code === "SCHEMA_REVISION_MISMATCH") {
+      const t = (await current())?.tools.get(name);
+      // no automatic retry: defaults, bounds or required fields may have changed under the agent's arguments
+      if (t)
+        return {
+          status: "rejected",
+          charged: false,
+          error_code: code,
+          error,
+          schema: t.agentSchema,
+          file_args: t.fileArgs,
+          hint: "not charged — the tool's schema changed in LoreMax: check your arguments against this schema, then call loremax_generate again",
+        };
+    }
+    if (code === "SCHEMA_REVISION_MISMATCH" || code === "WORKFLOW_UNAVAILABLE" || code === "TOOL_NOT_FOUND") {
+      const cur = await current();
+      return {
+        status: "rejected",
+        charged: false,
+        error_code: code,
+        error,
+        tools: cur ? [...cur.tools.keys()] : [],
+        hint: "not charged — this tool is unavailable in the profile: pick one of tools and read its schema with loremax_workflows first",
+      };
+    }
+    // an upload refused or a catalog read failed: the message says nothing was charged
+    if (e?.charged === false) throw e;
+    if (code === "INSUFFICIENT_TOKENS" || (e?.toolError && /insufficient tokens/i.test(error))) {
+      const required = Number(e.details?.requiredTokens);
+      return {
+        status: "failed",
+        charged: false,
+        error_code: "INSUFFICIENT_TOKENS",
+        error,
+        ...(Number.isFinite(required) ? { required_tokens: required } : {}),
+        hint: "the LoreMax balance is too low — a person has to top it up (they have been notified); do not retry until then",
+      };
+    }
+    if (code === "GENERATION_FAILED" || e?.toolError) {
+      const gid = e.details?.generationId;
+      return {
+        status: "failed",
+        ...(code ? { error_code: code } : {}),
+        error,
+        ...(gid != null ? { generation_id: String(gid) } : {}),
+        hint: "LoreMax refunds failed runs — check its generation history; do not retry blindly with the same arguments",
+      };
+    }
+    throw e;
+  }
+
+  /** The wake line for a profile submission that ended without a generation after the tool call had replied. */
+  async function profileLate(ph, e, name) {
+    let r;
+    try {
+      r = await profileFailure(e, name);
+    } catch (x) {
+      return lateFailure(ph, x);
+    }
+    const issues = r.issues?.length ? ` — issues: ${JSON.stringify(r.issues).slice(0, 1500)}` : "";
+    return r.status === "rejected"
+      ? `${ph.what} was refused before it ran (not charged): ${r.error}${issues}. ${r.hint}${ph.task}.`
+      : `${ph.what} FAILED: ${r.error}${r.generation_id ? ` (generation ${r.generation_id})` : ""}. ${r.hint}${ph.task}.`;
+  }
+
   /** Reference paths → absolute files, all checked before anything is sent (or paid for). */
   function loadReferences(ws, refs) {
     if (refs.length > MAX_REFS) throw new Error(`at most ${MAX_REFS} references per generation, got ${refs.length}`);
@@ -1177,21 +1425,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       // aborting it would not stop LoreMax, so it is never cut short by the tool call's deadline
       return await lmx.restJson("/api/v2/workflow/execute", init, { timeoutMs: 600_000 });
     } catch (e) {
-      // a timeout, a dropped connection (fetch's TypeError) or a gateway 5xx without
-      // LoreMax's own JSON body (an edge 502/524 cutting a long sync render) leaves the
-      // outcome unknown: LoreMax may already have taken the tokens and be rendering
-      let body;
-      try {
-        body = JSON.parse(e?.body ?? "");
-      } catch {}
-      const unknown = e?.status != null
-        ? e.status >= 500 && (body == null || typeof body !== "object")
-        : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
-      if (!unknown) throw e;
-      throw Object.assign(
-        new Error(`loremax execute got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`),
-        { ambiguous: true },
-      );
+      throw unanswered(e, "execute");
     }
   }
 
@@ -1228,7 +1462,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         model: job.workflow,
         label: jobLabel(job.note, job.tokensCost),
         // kept with the job row on newer cores (older ones ignore it): a restart keeps the provenance
-        params: { inputs: job.inputs, references: job.references, tokensCost: job.tokensCost, note: job.note },
+        params: job.mode === "profile"
+          ? { mode: "profile", tool: job.tool, arguments: job.arguments, references: job.references, tokensCost: job.tokensCost, note: job.note, identity: job.identity, profile: job.profile }
+          : { inputs: job.inputs, references: job.references, tokensCost: job.tokensCost, note: job.note },
       })
       : null;
     generations.set(job.generationId, job);
@@ -1238,7 +1474,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * The placeholder row of a submission in progress: a restart while LoreMax
    * renders a slow request leaves it running, and the next watcher tells the agent.
    */
-  function trackSubmit(call, { mode, workflow, note }) {
+  function trackSubmit(call, { mode, workflow, tool, note }) {
     const submitId = `submit:${crypto.randomUUID()}`;
     const trackedId = ctx.jobs.track({
       workspace: call.workspace,
@@ -1247,12 +1483,12 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       sessionKey: call.sessionKey ?? null,
       runId: call.runId ?? null,
       externalId: submitId,
-      model: workflow,
+      model: workflow ?? tool,
       label: note,
-      params: { submitting: true, mode, workflow, note },
+      params: { submitting: true, mode, ...(tool != null ? { tool } : { workflow }), note },
     });
     inFlight.add(submitId);
-    return { submitId, trackedId, call, what: `LoreMax ${workflow}${note ? ` (${note})` : ""}`, task: call.taskId ? ` (task ${call.taskId})` : "" };
+    return { submitId, trackedId, call, what: `LoreMax ${workflow ?? tool}${note ? ` (${note})` : ""}`, task: call.taskId ? ` (task ${call.taskId})` : "" };
   }
 
   function settleSubmit(ph, status, { generationId, error } = {}) {
@@ -1295,24 +1531,72 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     }
   }
 
-  /** The submission answered after the tool call had replied `submitting`. */
-  async function settleLate(ph, { sub, error }, base) {
+  /** The wake line for a submission that failed off the tool call. */
+  const lateFailure = (ph, e) => {
+    const msg = String(e?.message ?? e);
+    return e?.ambiguous
+      ? `${ph.what}: ${msg}${ph.task}.`
+      : `${ph.what} FAILED: ${msg}. Decide whether to retry (other inputs or workflow) or report the blocker${ph.task}.`;
+  };
+
+  /**
+   * The submission answered after the tool call had replied `submitting`.
+   * accept(outcome) → { job, result } (throws for a failed one); explain(error) → the wake line.
+   */
+  async function settleLate(ph, outcome, accept, explain = (e) => lateFailure(ph, e)) {
     let got;
     try {
-      if (error) throw error;
-      got = accepted(ph.call, sub, base);
+      if (outcome.error) throw outcome.error;
+      got = accept(outcome);
     } catch (e) {
-      const msg = String(e?.message ?? e);
-      settleSubmit(ph, "failed", { error: msg });
-      wakeSubmit(ph, e?.ambiguous
-        ? `${ph.what}: ${msg}${ph.task}.`
-        : `${ph.what} FAILED: ${msg}. Decide whether to retry (other inputs or workflow) or report the blocker${ph.task}.`);
+      settleSubmit(ph, "failed", { error: e?.message ?? e });
+      wakeSubmit(ph, await explain(e));
       return;
     }
     if (got.result) return finishLate(ph, got.job, got.result);
     // async: the real job row takes over before the placeholder goes; the watcher wakes the agent
     trackGeneration(ph.call, got.job);
     settleSubmit(ph, "succeeded", { generationId: got.job.generationId });
+  }
+
+  /** The submission raced against the budget: its outcome, or null once `until` passes first (never on a blocking core). */
+  async function raceBudget(ph, submission, until) {
+    if (!ph) return submission;
+    const timer = new AbortController();
+    const first = await Promise.race([submission, sleep(Math.max(0, until - now()), timer.signal).then(() => null)]);
+    timer.abort();
+    return first;
+  }
+
+  /**
+   * An accepted submission within the budget → the tool reply: a synchronous
+   * result is finished (in the background when too close to the deadline), an
+   * async one is tracked and polled with what is left of the budget.
+   */
+  async function landed(call, ph, { job, result }, { until, deadline, waitS }) {
+    if (result) {
+      // too close to the deadline for downloads: saved in the background, the agent is woken
+      if (ph && deadline - now() < FINISH_RESERVE_MS) {
+        finishLate(ph, job, result).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+        return {
+          generation_id: job.generationId,
+          status: "in_progress",
+          tokens_cost: job.tokensCost,
+          hint: "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files",
+        };
+      }
+      try {
+        const done = await outputs.finish(call, { ...job, trackedId: null }, { result, fromReply: true });
+        if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
+        return done;
+      } catch (e) {
+        if (ph) settleSubmit(ph, "failed", { generationId: job.generationId, error: e?.message ?? e });
+        throw e;
+      }
+    }
+    trackGeneration(call, job);
+    if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
+    return waitFor(call, job, { until, deadline, waitS });
   }
 
   registerTool({
@@ -1360,16 +1644,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       // survives a restart, and a wake); older cores block on the submission as before
       const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "rest", workflow, note }) : null;
       const submission = execute(init).then((sub) => ({ sub }), (error) => ({ error }));
-      let first;
-      if (ph) {
-        const timer = new AbortController();
-        first = await Promise.race([submission, sleep(Math.max(0, until - now()), timer.signal).then(() => null)]);
-        timer.abort();
-      } else {
-        first = await submission;
-      }
+      const first = await raceBudget(ph, submission, until);
       if (!first) {
-        submission.then((o) => settleLate(ph, o, base)).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+        submission.then((o) => settleLate(ph, o, ({ sub }) => accepted(call, sub, base))).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
         return text(JSON.stringify({
           status: "submitting",
           workflow,
@@ -1385,30 +1662,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         if (ph) settleSubmit(ph, "failed", { error: e?.message ?? e });
         throw e;
       }
-      const { job, result } = got;
-      if (result) {
-        // too close to the deadline for downloads: saved in the background, the agent is woken
-        if (ph && deadline - now() < FINISH_RESERVE_MS) {
-          finishLate(ph, job, result).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
-          return text(JSON.stringify({
-            generation_id: job.generationId,
-            status: "in_progress",
-            tokens_cost: job.tokensCost,
-            hint: "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files",
-          }, null, 1));
-        }
-        try {
-          const done = await outputs.finish(call, { ...job, trackedId: null }, { result, fromReply: true });
-          if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
-          return text(JSON.stringify(done, null, 1));
-        } catch (e) {
-          if (ph) settleSubmit(ph, "failed", { generationId: job.generationId, error: e?.message ?? e });
-          throw e;
-        }
-      }
-      trackGeneration(call, job);
-      if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
-      return text(JSON.stringify(await waitFor(call, job, { until, deadline, waitS }), null, 1));
+      return text(JSON.stringify(await landed(call, ph, got, { until, deadline, waitS }), null, 1));
     },
   });
 

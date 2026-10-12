@@ -521,3 +521,48 @@ test("loremax_result: wait_s 0 still does one check and saves a completed genera
   assert.equal(reply.status, "completed");
   assert.equal(f.calls.filter((c) => c.url.endsWith("/check")).length, 1);
 });
+
+test("restart in profile mode: the watcher and loremax_result finish a profile job from its persisted params", async () => {
+  const params = {
+    mode: "profile",
+    tool: "masked_edit",
+    arguments: { text: "fix the sky", source: "src.png" },
+    references: ["src.png"],
+    tokensCost: 7,
+    note: "sky",
+    identity: { workflowId: 7, visualId: "masked-edit", title: "masked_edit", category: "Image", contentType: "image", pipeline: false },
+    profile: "AbCdEfGh12345678",
+  };
+  const expectParams = { text: "fix the sky", source: "src.png", tool: "masked_edit", profile: "AbCdEfGh12345678", image_urls: ["src.png"] };
+
+  // a fresh activation (the in-memory job is gone): the watcher reads the row's params
+  const s = await setup({ config: { profile_url: "AbCdEfGh12345678" } });
+  s.track({ model: "masked-edit", label: "sky · 7 tk", params });
+  const f = mockFetch([checkRoute(s, [DONE]), PNG]);
+  restore = f.restore;
+  await s.watchOnce();
+  // REST check only, never the profile
+  assert.ok(f.calls.every((c) => !c.url.includes("/api/mcp")));
+  assert.equal(s.rec.annotate[0].meta.generation.workflow, "masked-edit");
+  assert.deepEqual(s.rec.annotate[0].meta.generation.params, expectParams);
+  assert.match(s.rec.annotate[0].meta.description, /· sky$/);
+  assert.equal(s.rec.usage.length, 1);
+  assert.deepEqual({ model: s.rec.usage[0].model, units: s.rec.usage[0].units, ref: s.rec.usage[0].ref }, { model: "masked-edit", units: 7, ref: "501" });
+  assert.match(s.rec.wakes[0].prompt, /finished: artifacts\/task-9\/masked-edit-501\.png/);
+  assert.equal(s.jobs[0].status, "succeeded");
+  restore();
+
+  const s2 = await setup({ config: { profile_url: "AbCdEfGh12345678" } });
+  s2.track({ model: "masked-edit", label: "sky · 7 tk", params });
+  restore = mockFetch([checkRoute(s2, [DONE]), PNG]).restore;
+  const r = await s2.run({ generation_id: "501" });
+  assert.equal(r.status, "completed");
+  assert.deepEqual(r.artifacts, ["task-9/masked-edit-501.png"]);
+  assert.deepEqual(s2.rec.annotate[0].meta.generation.params, expectParams);
+  assert.equal(s2.rec.usage[0].units, 7);
+  assert.equal(s2.jobs[0].status, "succeeded");
+  // settled: the watcher does not save, bill or wake again
+  await s2.watchOnce();
+  assert.equal(s2.rec.usage.length, 1);
+  assert.equal(s2.rec.wakes.length, 0);
+});

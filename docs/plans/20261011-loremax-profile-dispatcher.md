@@ -339,10 +339,10 @@
 - ➕ API: `createUploader(ctx, lmx, outputs, {now, cache})` → `uploadFiles(call, tool, args, {deadline})` returns `{arguments, references}` (the workspace paths in argument order, for provenance); the cache is process-wide (`globalThis` symbol, ≤ 2000 entries); an array slot takes a single path as a list of one, `maxItems`/`minItems` of the slot are checked, a non-https URL scheme is refused; every failure carries `charged: false` and a deadline failure also `deadline: true` (for Task 8's "uploads are cached — call again"); a finalize chunk counts as lost on a timeout, dropped connection, 5xx or a reply missing from the batch, never on a tool error
 
 ### Task 8: `loremax_generate` in profile mode
-- [ ] in profile mode register `loremax_generate` with schema `{tool: string, arguments: record, wait_s?, note?}` and a mode-specific description: paid per call; read the tool with `loremax_workflows` first; file arguments take workspace paths.
-- [ ] the whole profile sequence runs inside the Task 1 detached unit under the one budget measured from tool start: catalog lookup → `uploadFiles` → `toolCall(profilePath, tool, args, {timeoutMs: 600_000})` → wait. On older cores (no detaching), abort with "nothing was charged; uploads are cached — call loremax_generate again" when less than ~15 s of budget is left after the uploads. Never start the paid call after the budget has elapsed unless the tool has already replied `submitting`.
-- [ ] arguments: the agent arguments with uploaded URLs, plus the cached `schema_revision` and `on_behalf_of = bridex:<workspace>:<agent>` (reduced to `[A-Za-z0-9._:@ -]`, trimmed, ≤ 128); never `api_key`
-- [ ] map outcomes:
+- [x] in profile mode register `loremax_generate` with schema `{tool: string, arguments: record, wait_s?, note?}` and a mode-specific description: paid per call; read the tool with `loremax_workflows` first; file arguments take workspace paths.
+- [x] the whole profile sequence runs inside the Task 1 detached unit under the one budget measured from tool start: catalog lookup → `uploadFiles` → `toolCall(profilePath, tool, args, {timeoutMs: 600_000})` → wait. On older cores (no detaching), abort with "nothing was charged; uploads are cached — call loremax_generate again" when less than ~15 s of budget is left after the uploads. Never start the paid call after the budget has elapsed unless the tool has already replied `submitting`.
+- [x] arguments: the agent arguments with uploaded URLs, plus the cached `schema_revision` and `on_behalf_of = bridex:<workspace>:<agent>` (reduced to `[A-Za-z0-9._:@ -]`, trimmed, ≤ 128); never `api_key`
+- [x] map outcomes:
   - `INVALID_WORKFLOW_INPUT` / `MEDIA_INPUT_INVALID` → "not charged" with `details.issues` and the tool schema;
   - `SCHEMA_REVISION_MISMATCH` → force-refresh the catalog and reply "not charged — schema changed" with the fresh schema (no auto-retry);
   - `WORKFLOW_UNAVAILABLE` / `TOOL_NOT_FOUND` → refresh and reply "tool unavailable" with the current tool list;
@@ -350,14 +350,14 @@
   - `INSUFFICIENT_TOKENS` → out-of-funds card and a reply;
   - `GENERATION_FAILED`, an uncoded `isError`, or a success reply with `status: 'failed'` → reply failed with the error and `generationId` when present, plus "LoreMax refunds failed runs — check history, do not retry blindly"; no tracking and no usage;
   - no reply → the existing "may have been charged" text.
-- [ ] on success, if the reply carries outputs (`originalUrls`/`previewUrls`/`externalUrls`/`textContent`) and `status: 'completed'`, call `finish` directly. Otherwise, including a pipeline reply without URLs, `ctx.jobs.track` with `params: {mode: 'profile', tool, arguments (workspace paths, not URLs), references, tokensCost, note, identity}` and wait via the REST `check` in `waitFor`.
-- [ ] provenance and usage:
+- [x] on success, if the reply carries outputs (`originalUrls`/`previewUrls`/`externalUrls`/`textContent`) and `status: 'completed'`, call `finish` directly. Otherwise, including a pipeline reply without URLs, `ctx.jobs.track` with `params: {mode: 'profile', tool, arguments (workspace paths, not URLs), references, tokensCost, note, identity}` and wait via the REST `check` in `waitFor`.
+- [x] provenance and usage:
   - `generation.workflow = identity.visualId ?? identity.title ?? tool`;
   - `params` = the agent's arguments with workspace paths, plus `image_urls` = all referenced paths (for the studio ProvenanceCard thumbnails), plus `tool` and `profile`;
   - `usage.record`: `model` = the same workflow label, `ref` = `generationId`;
   - the job label keeps `<note> · <n> tk`.
-- [ ] make `fromRow`, `loremax_result` and the watcher accept both REST and profile job params (restart-safe); REST mode unchanged
-- [ ] write tests in `test/generate.test.mjs` (profile section):
+- [x] make `fromRow`, `loremax_result` and the watcher accept both REST and profile job params (restart-safe); REST mode unchanged
+- [x] write tests in `test/generate.test.mjs` (profile section):
   - happy path with uploads;
   - injected `schema_revision` and `on_behalf_of`, with sanitization;
   - each error mapping, including uncoded `isError` and `status: 'failed'`;
@@ -368,7 +368,10 @@
   - completed reply with text gets saved;
   - provenance and usage fields;
   - restart: the watcher finishes a profile job from persisted params (`test/result-watcher.test.mjs`).
-- [ ] run `npm test` - must pass before task 9
+- [x] run `npm test` - must pass before task 9
+- ➕ replies without a generation are JSON, not thrown: `{status: "rejected", charged: false, error_code, error, issues?, schema? | tools?, hint}` for the preflight/refresh codes and `{status: "failed", error_code?, error, generation_id? | required_tokens?, hint}` for INSUFFICIENT_TOKENS / GENERATION_FAILED / uncoded `isError` / `status: 'failed'`; config errors, the "may have been charged" error and refused uploads still throw. `toolResult` marks LoreMax's `isError` errors `toolError: true` so a lost reply is never taken for a failed run, and a refused upload (also `toolError` from the upload tools) is told apart by `charged: false`
+- ➕ the older-core reserve (15 s) is measured against the 50 s hard deadline, not against `wait_s`: with `wait_s: 10` a budget-relative reserve would refuse every call. A detached unit gets no deadline for the catalog and uploads (each request keeps its own timeout): its outcome always reaches the agent, by the reply or a wake
+- ➕ profile job params also keep `profile` (the publicId) so provenance after a restart names the profile the job ran on; the REST and profile handlers share `raceBudget` / `landed` / `settleLate(ph, outcome, accept, explain)`, and `unanswered(e, what)` is the one "outcome unknown" rule for both paid calls
 
 ### Task 9: Health check and balance tile in profile mode
 - [ ] in profile mode call `get_balance` on the profile path (same key) for `registerCheck`/`registerStat`, and make the check also report the number of generation tools from `tools/list` ("profile reachable, N tools")
