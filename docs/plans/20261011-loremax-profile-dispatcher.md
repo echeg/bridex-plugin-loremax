@@ -394,7 +394,7 @@
 - ➕ the review found that an inline save was not bounded by the 50 s deadline: each download keeps its own 300 s timeout, so a slow CDN could hold a tool call past the client's 60 s. Fixed: on cores with `ctx.jobs` and `ctx.wakeAgent`, an inline `finish` (a sync reply in `landed`, or a completed generation in `waitFor`) is raced against the deadline. Past it, the tool replies `in_progress` ("being saved … you will be WOKEN"); the save goes on in the background, holding `inFlight` so neither the watcher nor `loremax_result` saves it again, and then wakes the agent once. A submission uses the `loremax-submit:` key; a tracked generation uses the watcher's `loremax-job:<id>` key and wakes only after its row has settled. Older cores still block, as in 0.1.0. REST `loremax_workflows` now passes the same 50 s deadline to its requests (a pricing call that runs out of time stays non-fatal). Tests: `test/generate.test.mjs` (slow downloads, sync and polled, older core), `test/workflows.test.mjs` (Retry-After past the deadline)
 
 ### Task 11: [Final] Update documentation
-- [ ] `README.md`:
+- [x] `README.md`:
   - profile mode: what a LoreMax profile is, getting the URL in `/organization/mcp`, a config example with `profile_url`;
   - the tools table for both modes;
   - file arguments with workspace paths and upload limits;
@@ -402,11 +402,12 @@
   - `default_wait_s` 45 and the `submitting` reply;
   - Text outputs saved as `.md`;
   - the "For the studio" section: with a profile, `studio/art-guide.md` names profile tools instead of workflow ids.
-- [ ] `CHANGELOG.md` 0.2.0 entry; `plugin.yaml` `version: 0.2.0`
-- [ ] update `docs/backlog/cli-mcp-tool-timeout-vs-long-waits.md`:
+- [x] `CHANGELOG.md` 0.2.0 entry; `plugin.yaml` `version: 0.2.0`
+- [x] update `docs/backlog/cli-mcp-tool-timeout-vs-long-waits.md`:
   - the 60 s SDK default is confirmed for the llm adapter (studio `mcpClient.ts:154`, SDK 1.29.0);
   - the plugin now caps its own budget at 50 s and detaches submissions;
   - fix the stale `waitFor` line reference.
+- ➕ `package.json` `version` bumped to 0.2.0 with `plugin.yaml`; the README also notes that generations of a disabled profile still finish through REST polling, and the backlog entry now points at `raceBudget`, the `submit:` placeholder and the watcher's orphan handling
 
 ## Technical Details
 - **Profile URL**: `https://<base>/api/mcp/s/<publicId>`; same `Authorization: Bearer <lmx_prod_…>`; stateless
