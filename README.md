@@ -225,7 +225,10 @@ a completed reply carries neither files nor text.
 Originals are preferred over previews, previews over external URLs. A file over
 512 MB, one whose download fails, or one that can't be written (full disk, no
 permission) stays on LoreMax's CDN: the reply (and the watcher's wake-up) lists
-its URL under `left_on_cdn`, and the spend is recorded all the same. A
+its URL under `left_on_cdn`, and the spend is recorded all the same. Text has
+no CDN copy: when its `.md` can't be written the spend is recorded, the job is
+left running and the save is retried by the watcher (or the next
+`loremax_result`) until it lands. A
 synchronous workflow returns its outputs in the execute reply; they are saved
 the same way, with no polling. Outputs are mirrored to the instance's cloud
 bucket when one is configured.

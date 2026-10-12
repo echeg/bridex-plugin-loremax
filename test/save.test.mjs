@@ -288,6 +288,26 @@ test("finish: a local save error leaves that output on the CDN, spend is still r
   assert.ok(s.rec.logs.some((l) => l.level === "warn" && /not saved \(/.test(l.msg)));
 });
 
+test("finish: a text output that cannot be written throws, spend recorded, job left running", async () => {
+  const s = setup();
+  // the task folder's name is taken by a file: mkdir fails like a read-only or full disk would
+  const art = s.ctx.paths.workspaceArtifacts("studio");
+  fs.mkdirSync(art, { recursive: true });
+  fs.writeFileSync(path.join(art, "task-7"), "not a folder");
+  const trackedId = s.ctx.jobs.track({ externalId: "g9", model: "Story" });
+  await assert.rejects(
+    s.finish(CALL, { generationId: "g9", workflow: "Story", tokensCost: 3, trackedId }, { result: { textContent: "once upon" }, fromReply: true }),
+    /generation g9 finished, but its text output was not saved \(/,
+  );
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.jobs[0].status, "running");
+  // once the folder is writable, the retried finish saves the text and settles
+  fs.rmSync(path.join(art, "task-7"));
+  const done = await s.finish(CALL, { generationId: "g9", workflow: "Story", tokensCost: 3, trackedId }, { result: { textContent: "once upon" }, fromReply: true });
+  assert.deepEqual(done.artifacts, ["task-7/story-g9.md"]);
+  assert.equal(s.jobs[0].status, "succeeded");
+});
+
 test("saveOutputs: a failing annotate keeps the saved file in the reply", async () => {
   const f = mockFetch([["GET", `${CDN}/ok`, () => file("OK", "image/png")]]);
   restore = f.restore;

@@ -296,6 +296,22 @@ test("upload: the cache skips a repeat upload for an hour; another key misses", 
   assert.equal(other.sent().filter((p) => p.name === "request_upload_url").length, 1);
 });
 
+test("upload: a same-size edit between hashing and the PUT is refused and never cached", async () => {
+  const cache = new Map();
+  let s;
+  s = await setup({
+    cache,
+    onCall: (name) => {
+      // the file changes after it was hashed, before its bytes are read for the PUT
+      if (name === "request_upload_url") s.write("src.png", "BBBB");
+    },
+  });
+  s.write("src.png", "AAAA");
+  await assert.rejects(s.upload("masked_edit", { source: "src.png" }), (e) => e.charged === false && /src\.png changed while it was being uploaded/.test(e.message));
+  assert.equal(s.f.calls.filter((c) => c.method === "PUT").length, 0);
+  assert.equal(cache.size, 0);
+});
+
 test("upload: an https URL passes through unchanged and is no reference", async () => {
   const s = await setup();
   const r = await s.upload("masked_edit", { text: "t", source: "https://cdn.loremax.test/org/abc.png" });

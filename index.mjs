@@ -726,10 +726,15 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       const ext = EXT_BY_MIME[declared] ?? EXT_BY_MIME[served] ?? (urlExt || "bin");
       store(`${workflowSlug}-${id}${urls.length > 1 ? `-${i + 1}` : ""}.${ext}`, buf, (why) => skip(url, `${why}, left on the CDN`));
     }
-    // the text came in the reply: nothing stays on a CDN if it cannot be written
-    if (text) store(`${workflowSlug}-${id}.md`, Buffer.from(text, "utf8"), (why) => ctx.log.warn(`loremax text output ${why}`));
+    // the text came in the reply: nothing stays on a CDN if it cannot be written, so finish must not settle without it
+    let textError = "";
+    if (text)
+      store(`${workflowSlug}-${id}.md`, Buffer.from(text, "utf8"), (why) => {
+        ctx.log.warn(`loremax text output ${why}`);
+        textError = why;
+      });
     if (rels.length) ctx.artifacts.mirror(call.workspace, rels);
-    return { artifacts: rels, skipped };
+    return { artifacts: rels, skipped, ...(textError ? { textError } : {}) };
   }
 
   /**
@@ -775,7 +780,7 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
     };
     let result = check?.result ?? {};
     if (check?.fromReply && !urlsOf(result).length && !textOf(result)) result = (await lookupOutputs(job.generationId)) ?? result;
-    const { artifacts, skipped } = await saveOutputs(call, slugOf(workflow), job.generationId, result, job.note ?? "", generation);
+    const { artifacts, skipped, textError } = await saveOutputs(call, slugOf(workflow), job.generationId, result, job.note ?? "", generation);
     ctx.usage.record({
       workspace: call.workspace,
       agent: call.agent,
@@ -788,6 +793,8 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       // the host counts one spend per ref: a finish repeated after a crash is not billed twice
       ref: String(job.generationId),
     });
+    // the job stays unsettled: the watcher (or the next loremax_result) writes the text again
+    if (textError) throw new Error(`LoreMax generation ${job.generationId} finished, but its text output was ${textError} — poll loremax_result with this generation_id once the workspace is writable`);
     const leftOnCdn = skipped.length ? { left_on_cdn: skipped } : {};
     if (job.trackedId && ctx.jobs)
       ctx.jobs.settle(job.trackedId, { status: "succeeded", result: { workspace: call.workspace, artifacts, tokensCost, ...leftOnCdn } });
@@ -901,7 +908,8 @@ export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (glo
       const left = deadline == null ? Infinity : deadline - now();
       if (left <= 0) throw deadlineError(`upload of ${it.shown}`);
       const buf = fs.readFileSync(it.abs);
-      if (buf.length !== it.size) throw new Error(`${it.shown} changed while it was being uploaded`);
+      // the cache key is the hash taken before the tickets: other bytes must not be cached under it
+      if (buf.length !== it.size || sha256(buf) !== it.sha) throw new Error(`${it.shown} changed while it was being uploaded`);
       let res;
       try {
         // exactly the signed headers: Content-Type and Content-Length are bound to the ticket
@@ -1020,7 +1028,7 @@ export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (glo
         const k = `${keyHash}:${pos.fa.mediaType}:${pos.sha}`;
         pos.url = cacheGet(k);
         if (pos.url) continue;
-        if (!items.has(k)) items.set(k, { key: k, abs: pos.abs, shown: pos.value, filename: path.basename(pos.abs), mime: pos.mime, mediaType: pos.fa.mediaType, size: pos.size, positions: [] });
+        if (!items.has(k)) items.set(k, { key: k, sha: pos.sha, abs: pos.abs, shown: pos.value, filename: path.basename(pos.abs), mime: pos.mime, mediaType: pos.fa.mediaType, size: pos.size, positions: [] });
         items.get(k).positions.push(pos);
       }
       const todo = [...items.values()];
