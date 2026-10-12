@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * LoreMax plugin: image and video generation through the organization's
- * LoreMax workflows. Agents list workflows and read a workflow's input fields
+ * LoreMax plugin: image, video, audio, 3D and text generation through the
+ * organization's LoreMax workflows (or a curated MCP profile's). Agents list workflows and read a workflow's input fields
  * and price (both free), run one with workspace files as references, and get
  * the outputs saved into the task's artifacts with provenance and token spend.
  * The key is the managed LOREMAX_API_KEY credential (Settings → Integrations),
@@ -200,7 +200,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   // an empty balance: one needs-a-person card in the inbox, not a silent failed run
   // (ctx.billing exists on newer Bridex cores; older ones just skip it)
   const outOfFunds = (detail) =>
-    ctx.billing?.outOfFunds?.({ provider: "LoreMax", what: "image and video generation (loremax plugin)", detail: String(detail).slice(0, 400) });
+    ctx.billing?.outOfFunds?.({ provider: "LoreMax", what: "media generation (loremax plugin)", detail: String(detail).slice(0, 400) });
 
   /**
    * One request with a single Retry-After retry on 429 → { res, body }. `deadline`
@@ -429,13 +429,13 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
     log?.warn?.(msg);
   };
 
-  async function load({ deadline } = {}) {
+  async function load() {
     const path = lmx.profilePath();
     const entries = [];
     let cursor;
     // a profile holds at most 10 workflows; pages are followed only in case the server ever paginates
     for (let page = 0; page < 10; page++) {
-      const msg = await lmx.rpc(path, { jsonrpc: "2.0", id: lmx.nextId(), method: "tools/list", ...(cursor ? { params: { cursor } } : {}) }, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
+      const msg = await lmx.rpc(path, { jsonrpc: "2.0", id: lmx.nextId(), method: "tools/list", ...(cursor ? { params: { cursor } } : {}) }, { timeoutMs: LOOKUP_TIMEOUT_MS });
       if (msg?.error) throw new Error(`loremax ${path} tools/list: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
       const list = msg?.result?.tools;
       if (Array.isArray(list)) entries.push(...list);
@@ -459,11 +459,16 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
     return { tools, service, fetchedAt: now() };
   }
 
-  /** The catalog, reread when stale or forced; concurrent callers share one tools/list. */
+  /**
+   * The catalog, reread when stale or forced; concurrent callers share one
+   * tools/list. Each caller waits for it until its own `deadline` only: the
+   * shared read is bounded per page, never by the caller that started it.
+   */
   async function get({ force = false, deadline } = {}) {
     if (!force && cached && now() - cached.fetchedAt < CATALOG_TTL_MS) return cached;
+    if (deadline != null && deadline - now() <= 0) throw deadlineError("tools/list");
     if (!loading) {
-      loading = load({ deadline }).then(
+      loading = load().then(
         (c) => ((cached = c), (loading = null), c),
         (e) => {
           loading = null;
@@ -471,7 +476,12 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
         },
       );
     }
-    return loading;
+    if (deadline == null) return loading;
+    let timer;
+    const late = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(deadlineError("tools/list")), deadline - now());
+    });
+    return Promise.race([loading, late]).finally(() => clearTimeout(timer));
   }
 
   /** Marks the cache stale when `err` says the catalog changed; true if it did. */
@@ -1278,7 +1288,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       if (e?.deadline)
         throw Object.assign(new Error("loremax_generate ran out of time before the paid call — nothing was charged; uploads are cached — call loremax_generate again"), { charged: false });
       // a catalog read that failed: the generation was never sent
-      if (!e?.code && !/nothing was charged/.test(e?.message ?? "")) e.message = `${e?.message ?? e} — nothing was charged`;
+      if (!e?.code && e?.charged !== false) Object.assign(e, { message: `${e?.message ?? e} — nothing was charged`, charged: false });
       throw e;
     }
     let sub;
@@ -1286,7 +1296,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       // the paid call is never cut short: aborting it would not stop LoreMax
       sub = await lmx.toolCall(profile.path, name, { ...up.arguments, schema_revision: t.revision, on_behalf_of: onBehalfOf(call) }, { timeoutMs: 600_000 });
     } catch (e) {
-      throw unanswered(e, name);
+      const u = unanswered(e, name);
+      // an answer that is no tool outcome (a JSON-RPC error, an unreadable result, a missing reply): it may have run
+      if (u === e && e?.status == null && !e?.code && !e?.toolError)
+        throw Object.assign(new Error(`${e?.message ?? e} — LoreMax may have accepted and charged this generation; check its generation history before running it again`), { ambiguous: true });
+      throw u;
     }
     return { sub, tool: t, references: up.references };
   }
@@ -1345,7 +1359,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       };
     }
     if (code === "SCHEMA_REVISION_MISMATCH") {
-      const t = (await current())?.tools.get(name);
+      const cur = await current();
+      const t = cur?.tools.get(name);
       // no automatic retry: defaults, bounds or required fields may have changed under the agent's arguments
       if (t)
         return {
@@ -1356,6 +1371,15 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           schema: t.agentSchema,
           file_args: t.fileArgs,
           hint: "not charged — the tool's schema changed in LoreMax: check your arguments against this schema, then call loremax_generate again",
+        };
+      // the reread failed: the tool may well still be there
+      if (!cur)
+        return {
+          status: "rejected",
+          charged: false,
+          error_code: code,
+          error,
+          hint: "not charged — the tool's schema changed in LoreMax: read it again with loremax_workflows, then call loremax_generate again",
         };
     }
     if (code === "SCHEMA_REVISION_MISMATCH" || code === "WORKFLOW_UNAVAILABLE" || code === "TOOL_NOT_FOUND") {
@@ -1514,34 +1538,49 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       prompt,
     });
 
-  /** A submission's synchronous result saved and billed, its placeholder settled → { done } | { error }. */
+  /**
+   * The generation's own job row takes over from the placeholder before it goes:
+   * a restart in between loses neither. A row that cannot be written fails the
+   * placeholder (naming the generation) and throws.
+   */
+  function adopt(ph, job) {
+    try {
+      trackGeneration(ph.call, job);
+    } catch (e) {
+      settleSubmit(ph, "failed", { generationId: job.generationId, error: e?.message ?? e });
+      throw e;
+    }
+    settleSubmit(ph, "succeeded", { generationId: job.generationId });
+  }
+
+  /**
+   * A submission's synchronous result saved and billed under its own job row →
+   * { done } | { error }. loremax_result finds the row once it is saved; a failed
+   * save leaves it running, and the watcher tries again and wakes the agent.
+   */
   async function saveSubmitted(ph, job, result) {
     const { generationId } = job;
     // loremax_result answers "being saved" meanwhile, and nothing else saves it
     inFlight.add(generationId);
-    generations.set(generationId, job);
     try {
-      const done = await outputs.finish(ph.call, { ...job, trackedId: null }, { result, fromReply: true });
-      settleSubmit(ph, "succeeded", { generationId });
+      adopt(ph, job);
+      const done = await outputs.finish(ph.call, job, { result, fromReply: true });
+      generations.delete(generationId);
       return { done };
     } catch (error) {
-      settleSubmit(ph, "failed", { generationId, error: error?.message ?? error });
       return { error };
     } finally {
       inFlight.delete(generationId);
-      generations.delete(generationId);
     }
   }
 
-  const wakeSaved = (ph, generationId, { done, error }) =>
+  const wakeSaved = (ph, job, { done, error }) => {
+    // a failed save with a job row is the watcher's now: it tries again and wakes the agent
+    if (error && job.trackedId) return ctx.log.warn(`loremax ${job.generationId}: saving its outputs failed: ${error?.message ?? error}`);
     wakeSubmit(ph, done
-      ? `${ph.what} — generation ${generationId} finished: ${savedList(done)} — check them, then continue where you left off${ph.task}.`
-      : `${ph.what} — generation ${generationId} finished, but saving its outputs failed: ${error?.message ?? error}${ph.task}.`);
-
-  /** A synchronous result finished off the tool call (it came late, or too close to the deadline): save, bill, wake. */
-  async function finishLate(ph, job, result) {
-    wakeSaved(ph, job.generationId, await saveSubmitted(ph, job, result));
-  }
+      ? `${ph.what} — generation ${job.generationId} finished: ${savedList(done)} — check them, then continue where you left off${ph.task}.`
+      : `${ph.what} — generation ${job.generationId} finished, but saving its outputs failed: ${error?.message ?? error} — check it on LoreMax${ph.task}.`);
+  };
 
   /** `work`'s outcome, or null once `deadline` passes first (the work goes on). */
   async function beforeDeadline(work, deadline) {
@@ -1580,10 +1619,14 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       wakeSubmit(ph, await explain(e));
       return;
     }
-    if (got.result) return finishLate(ph, got.job, got.result);
-    // async: the real job row takes over before the placeholder goes; the watcher wakes the agent
-    trackGeneration(ph.call, got.job);
-    settleSubmit(ph, "succeeded", { generationId: got.job.generationId });
+    // synchronous: save, bill, wake
+    if (got.result) return wakeSaved(ph, got.job, await saveSubmitted(ph, got.job, got.result));
+    // async: the watcher polls the job row and wakes the agent
+    try {
+      adopt(ph, got.job);
+    } catch (e) {
+      wakeSubmit(ph, `${ph.what} — LoreMax accepted it as generation ${got.job.generationId}, but tracking it failed (${e?.message ?? e}) — check it on LoreMax${ph.task}.`);
+    }
   }
 
   /** The submission raced against the budget: its outcome, or null once `until` passes first (never on a blocking core). */
@@ -1605,21 +1648,21 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const saving = saveSubmitted(ph, job, result);
       const first = deadline - now() < FINISH_RESERVE_MS ? null : await beforeDeadline(saving, deadline);
       if (!first) {
-        saving.then((o) => wakeSaved(ph, job.generationId, o)).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+        saving.then((o) => wakeSaved(ph, job, o)).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
         return beingSaved(job.generationId, job.tokensCost);
       }
       if (first.error) throw first.error;
       return first.done;
     }
-    trackGeneration(call, job);
-    if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
+    if (ph) adopt(ph, job);
+    else trackGeneration(call, job);
     return waitFor(call, job, { until, deadline, waitS });
   }
 
   registerTool({
     name: "loremax_generate",
     description:
-      `Run a LoreMax workflow (image or video) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands (or poll loremax_result with the generation_id). Never call it again for a submitting reply.`,
+      `Run a LoreMax workflow (image, video, audio, 3D or text) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands (or poll loremax_result with the generation_id). Never call it again for a submitting reply.`,
     schema: {
       workflow_id: z.string().describe("numeric id or visual id from loremax_workflows"),
       inputs: z.record(z.string(), z.unknown()).describe("workflow inputs, exactly as loremax_workflows names the input fields"),
@@ -1815,7 +1858,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         generation_id: String(generationId),
         status: "in_progress",
         tokens_cost: Number(job.tokensCost) || 0,
-        hint: ctx.jobs
+        hint: ctx.jobs && ctx.wakeAgent
           ? "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files (or poll loremax_result)"
           : "LoreMax finished it — call loremax_result with this generation_id to save the outputs",
       };
@@ -1824,7 +1867,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       generation_id: String(generationId),
       status: "in_progress",
       tokens_cost: Number(job.tokensCost) || 0,
-      hint: ctx.jobs
+      hint: ctx.jobs && ctx.wakeAgent
         ? `still rendering after ${waited}s — end your turn if nothing else is pending: you will be WOKEN when it lands (or poll loremax_result)`
         : `still rendering after ${waited}s — call loremax_result with this generation_id (the work continues on LoreMax's side)`,
     };
@@ -1927,7 +1970,13 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           : { ok: false, message: "key works, but the balance is empty — top up LoreMax" };
       }
       // the check is the one place a person asks "is it set up?": reread the catalog, not the cached one
-      const n = (await catalog.get({ force: true, deadline: now() + 15_000 })).tools.size;
+      let n;
+      try {
+        n = (await catalog.get({ force: true, deadline: now() + 15_000 })).tools.size;
+      } catch (e) {
+        // the key works (get_balance answered): it is the profile's catalog that failed
+        return { ok: false, message: `key works, but the profile's tools/list failed: ${short(e?.message ?? e)}` };
+      }
       const reach = `profile reachable, ${n} tool${n === 1 ? "" : "s"}`;
       if (n === 0) return { ok: false, message: `${reach} — add workflows to the profile in LoreMax → Organization → MCP` };
       return remaining > 0

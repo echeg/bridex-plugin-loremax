@@ -150,7 +150,7 @@ fixes it and calls again:
 | `error_code` | Meaning | The reply also carries |
 |---|---|---|
 | `INVALID_WORKFLOW_INPUT`, `MEDIA_INPUT_INVALID` | the arguments or files do not match the schema | `issues` and the tool's schema |
-| `SCHEMA_REVISION_MISMATCH` | the workflow changed in LoreMax since the schema was read | the fresh schema (no automatic retry: defaults, bounds or required fields may have changed) |
+| `SCHEMA_REVISION_MISMATCH` | the workflow changed in LoreMax since the schema was read | the fresh schema (no automatic retry: defaults, bounds or required fields may have changed); when the reread itself fails, a hint to read it again with `loremax_workflows` |
 | `WORKFLOW_UNAVAILABLE`, `TOOL_NOT_FOUND` | the tool is no longer published or not in the profile | the current tool list |
 
 A call that ran and failed comes back as `{status: "failed", error_code?, error,
@@ -158,18 +158,20 @@ hint}`:
 
 | `error_code` | Meaning |
 |---|---|
-| `INSUFFICIENT_TOKENS` | the balance is too low; the out-of-funds card is raised, `required_tokens` when LoreMax gives it |
+| `INSUFFICIENT_TOKENS` | the balance is too low; the out-of-funds card is raised, `required_tokens` when LoreMax gives it. Carries `charged: false`: nothing was debited |
 | `GENERATION_FAILED` (or none) | LoreMax could not run the generation; `generation_id` when there is one. LoreMax refunds failed runs, so the hint says to check its history rather than retry blindly |
 
 These are thrown as tool errors instead:
 
-- a config error: an invalid `profile_url`, or `PROFILE_NOT_FOUND` (unknown or
-  disabled profile, or a key from another organization);
+- a config error: an invalid `profile_url`, `PROFILE_NOT_FOUND` (unknown or
+  disabled profile, or a key from another organization), or
+  `PROFILE_ORGANIZATION_MISMATCH` (the profile belongs to another organization
+  than `LOREMAX_API_KEY`);
 - a refused upload, or a call that ran out of time before the paid request
   ("nothing was charged");
-- a paid request that got no reply at all (timeout, dropped connection): the
-  generation may already have been charged, so the agent checks LoreMax before
-  running it again.
+- a paid request that got no usable reply (timeout, dropped connection, a
+  JSON-RPC error or an unreadable result): the generation may already have been
+  charged, so the agent checks LoreMax before running it again.
 
 ## Waiting
 
@@ -192,7 +194,9 @@ Retry-After sleeps and downloads.
 
 A generation that completes with less than ~10 s left, or whose downloads are
 still running at the deadline, is saved in the background and the agent is
-woken with the files. On older cores without `ctx.jobs` / `ctx.wakeAgent`
+woken with the files. A synchronous result saved this way is tracked under its
+own generation id too, so `loremax_result` finds it once it is saved, and a
+save that fails is retried by the watcher. On older cores without `ctx.jobs` / `ctx.wakeAgent`
 nothing is detached: the submission blocks as in 0.1.0 (only polling respects
 the budget), and in profile mode a call whose uploads leave less than 15 s is
 stopped before the paid request, with "nothing was charged; uploads are cached
@@ -268,8 +272,8 @@ The plugin check reports whether the key works and the token balance (it fails
 with "balance is empty — top up LoreMax" when the key works but no tokens
 remain). In profile mode it reads the balance through the profile and rereads
 its tool list: "profile reachable, N tools · … tk left", failing when the profile
-has no workflows, on a 404 profile (with the three causes) or an invalid
-`profile_url`. The dashboard shows a "LoreMax balance" tile, marked "running
+has no workflows, when the key works but the tool list cannot be read, on a
+404 profile (with the three causes) or an invalid `profile_url`. The dashboard shows a "LoreMax balance" tile, marked "running
 out" when it is empty or under 10 % of the limit.
 
 ## For the studio

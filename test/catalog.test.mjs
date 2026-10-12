@@ -162,6 +162,29 @@ test("catalog: concurrent gets share one tools/list", async () => {
   assert.equal(lists(), 1);
 });
 
+test("catalog: a caller's deadline ends only its own wait, never the tools/list others share", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const f = mockFetch([["POST", `/api/mcp/s/${PROFILE}`, async (req) => {
+    await gate;
+    return jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: { tools: fixtureTools() } });
+  }]]);
+  restore = f.restore;
+  const clock = { t: 1_000_000 };
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, profile_url: PROFILE } });
+  const catalog = createProfileCatalog(createClient(ctx, { now: () => clock.t }), { now: () => clock.t, log: ctx.log });
+  // the first caller has 20 ms left; the second joins its read with no deadline
+  const first = catalog.get({ deadline: clock.t + 20 });
+  const second = catalog.get();
+  await assert.rejects(first, (e) => e.deadline === true);
+  release();
+  assert.equal((await second).tools.size, 3);
+  assert.equal(f.calls.length, 1);
+  // a deadline already past is refused before any read
+  await assert.rejects(catalog.get({ force: true, deadline: clock.t }), (e) => e.deadline === true);
+  assert.equal(f.calls.length, 1);
+});
+
 test("catalog: refreshAfter marks the cache stale only for the refresh codes", async () => {
   const { catalog, lists } = setup();
   await catalog.get();

@@ -44,6 +44,16 @@ test("profile check: balance and tools/list on the profile path, reports the gen
   assert.equal(f.calls.filter((c) => c.json.method === "tools/list").length, 2);
 });
 
+test("profile check: a balance that answers but a failing tools/list blames the catalog, not the key", async () => {
+  const f = mockFetch([["POST", PROFILE_PATH, (req) =>
+    req.json.method === "tools/list" ? new Response("boom", { status: 500 }) : mcpResult({ limit: 1000, used: 0, remaining: 750 }, req.json.id)]]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.check();
+  assert.equal(r.ok, false);
+  assert.match(r.message, /^key works, but the profile's tools\/list failed/);
+});
+
 test("profile check: one tool is singular; a profile without generation tools fails", async () => {
   let tools = FIXTURE.result.tools.filter((t) => t.name === "write_text" || !t.inputSchema?.properties?.schema_revision);
   const f = mockFetch([profileRoute({ tools: () => tools })]);

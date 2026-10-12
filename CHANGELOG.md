@@ -29,6 +29,12 @@ Profile mode, and fixes for tool calls that outlived the agent's MCP client.
 - Audio (mp3, wav, m4a, ogg, flac, aac), more video (mkv, ts, m4v) and 3D (glb, gltf, obj, stl, usdz, fbx) outputs get
   their real extension instead of `.bin`.
 
+Upgrading from 0.1.0:
+
+- `default_wait_s` values above 50 in `bridex.yaml` are capped at 50; lower them to match the schema.
+- Agent prompts that handle `loremax_generate` replies should treat `status: "submitting"` as "end the turn, do not
+  call again": the agent is woken with the outcome.
+
 ## 0.1.0 — 2026-10-11
 
 First release.

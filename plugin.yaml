@@ -1,4 +1,4 @@
-# loremax — image and video generation through LoreMax (loremax.ai) workflows:
+# loremax — image, video, audio, 3D and text generation through LoreMax (loremax.ai) workflows:
 # list the organization's workflows (or, with profile_url, a curated MCP
 # profile's typed tools), read their inputs, run one with workspace files as
 # references.
@@ -9,7 +9,7 @@
 name: loremax
 version: 0.2.0
 kind: integration
-description: LoreMax workflows for agents — images and video. Outputs land in the task's artifacts with provenance and token spend.
+description: LoreMax workflows for agents — images, video, audio, 3D and text, from the whole organization or a curated MCP profile. Outputs land in the task's artifacts with provenance and token spend.
 entry: index.mjs
 requires_env:
   - LOREMAX_API_KEY    # managed credential: Settings → Integrations → LoreMax key (lmx_prod_…)

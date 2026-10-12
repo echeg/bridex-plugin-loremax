@@ -228,7 +228,7 @@ test("402 on execute: outOfFunds recorded, nothing tracked", async () => {
   assert.equal(f.calls.length, 1);
 });
 
-test("a workflow that finishes right away: outputs from the execute reply, no /check, no job", async () => {
+test("a workflow that finishes right away: outputs from the execute reply, no /check, its row settled and found by loremax_result", async () => {
   const f = mockFetch([
     ["POST", "/api/v2/workflow/execute", () => jsonResponse({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/now.png`] }, 202)],
     ["GET", `${CDN}/now.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
@@ -239,9 +239,15 @@ test("a workflow that finishes right away: outputs from the execute reply, no /c
   assert.equal(r.status, "completed");
   assert.deepEqual(r.artifacts, ["task-9/flux-portrait-777.png"]);
   assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
-  assert.equal(s.gens().length, 0);
+  assert.equal(s.gens().length, 1);
+  assert.equal(s.gens()[0].status, "succeeded");
   assert.equal(s.rec.usage[0].units, 5);
   assert.equal(s.rec.usage[0].ref, "777");
+  // the agent may poll it afterwards: the saved files, no new download
+  const later = JSON.parse((await s.rec.tools.get("loremax_result").handler({ generation_id: "777" }, CALL)).content[0].text);
+  assert.equal(later.status, "completed");
+  assert.deepEqual(later.artifacts, ["task-9/flux-portrait-777.png"]);
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/now.png")).length, 1);
 });
 
 test("a synchronous run ('success', only externalUrls): saved from the reply, never polled", async () => {
@@ -255,7 +261,7 @@ test("a synchronous run ('success', only externalUrls): saved from the reply, ne
   assert.equal(r.status, "completed");
   assert.deepEqual(r.artifacts, ["task-9/flux-portrait-778.png"]);
   assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
-  assert.equal(s.gens().length, 0);
+  assert.equal(s.gens()[0].status, "succeeded");
 });
 
 test("Text workflow: a sync reply carrying the text is saved as .md, no /check and no MCP call", async () => {
@@ -597,7 +603,9 @@ test("a synchronous result whose downloads outlast the deadline: the reply comes
   assert.match(reply.hint, /being saved.*WOKEN with the files/);
   assert.ok(s.clock.t <= 50_000);
   assert.equal(s.rec.usage.length, 0);
-  assert.equal(s.placeholders()[0].status, "running");
+  // the generation's own row took over: a restart now leaves it to the watcher, not a "may have been charged" wake
+  assert.equal(s.placeholders()[0].status, "succeeded");
+  assert.equal(s.gens()[0].status, "running");
   // meanwhile loremax_result does not start a second save
   const meanwhile = JSON.parse((await s.rec.tools.get("loremax_result").handler({ generation_id: "777" }, CALL)).content[0].text);
   assert.match(meanwhile.hint, /being checked and saved right now/);
@@ -608,7 +616,7 @@ test("a synchronous result whose downloads outlast the deadline: the reply comes
   assert.match(s.rec.wakes[0].prompt, /generation 777 finished: artifacts\/task-9\/kling-777\.mp4/);
   assert.ok(fs.existsSync(path.join(s.art, "task-9/kling-777.mp4")));
   assert.equal(s.rec.usage.length, 1);
-  assert.equal(s.placeholders()[0].status, "succeeded");
+  assert.equal(s.gens()[0].status, "succeeded");
   assert.equal(f.calls.filter((c) => c.url.endsWith("/big.mp4")).length, 1);
   assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
 });
@@ -849,9 +857,11 @@ test("profile happy path: uploads, injected revision and on_behalf_of, sync outp
   assert.equal(s.rec.usage[0].model, "masked-edit");
   assert.equal(s.rec.usage[0].ref, "901");
   assert.equal(s.rec.usage[0].units, 7);
-  // finished from the reply: no REST check, no generation row; the placeholder is settled
+  // finished from the reply: no REST check; its generation row is settled, and so is the placeholder
   assert.equal(s.f.calls.some((c) => c.url.includes("/check")), false);
-  assert.equal(s.gens().length, 0);
+  assert.equal(s.gens().length, 1);
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.equal(s.gens()[0].params.mode, "profile");
   assert.equal(s.placeholders()[0].status, "succeeded");
   assert.deepEqual(s.placeholders()[0].params, { submitting: true, mode: "profile", tool: "masked_edit", note: "sky fix" });
   assert.equal(s.ctx.jobs.pending().length, 0);
@@ -1107,6 +1117,150 @@ test("profile: a refusal after submitting wakes with the not-charged reason", as
   await eventually(() => s.rec.wakes.length === 1, "the wake");
   assert.match(s.rec.wakes[0].prompt, /was refused before it ran \(not charged\): .*source is too small — issues: .*min 64px/);
   nothingCharged(s);
+});
+
+test("profile: late outcomes after submitting — a lost reply, a failed run, an accepted async one", async () => {
+  const late = async (gen, routes = []) => {
+    const gate = held();
+    const s = await profileSetup({
+      onPut: async () => {
+        await gate.until;
+      },
+      gen,
+      routes,
+    });
+    s.write("src.png", "S");
+    const replying = s.run({ tool: "masked_edit", arguments: { text: "t", source: "src.png" }, note: "late" });
+    await s.time.expire();
+    assert.equal((await replying).status, "submitting");
+    gate.open();
+    return s;
+  };
+
+  // no reply to the paid call: the wake says it may have been charged
+  let s = await late(() => {
+    throw new TypeError("fetch failed");
+  });
+  await eventually(() => s.rec.wakes.length === 1, "the wake");
+  assert.match(s.rec.wakes[0].prompt, /got no reply \(fetch failed\).*may have accepted and charged/);
+  assert.equal(s.placeholders()[0].status, "failed");
+  assert.equal(s.gens().length, 0);
+  restore();
+
+  // a run that failed on LoreMax: FAILED with its generation id
+  s = await late(() => refusal("render crashed", "GENERATION_FAILED", { generationId: 650 }));
+  await eventually(() => s.rec.wakes.length === 1, "the wake");
+  assert.match(s.rec.wakes[0].prompt, /FAILED: .*render crashed \(generation 650\)/);
+  nothingCharged(s);
+  restore();
+
+  // accepted async: its own row takes over, and the watcher finishes it and wakes
+  s = await late(() => ({ generationId: 501, status: "pending", tokensCost: 12, async: true }), [
+    ["POST", "/api/v2/generations/501/check", () => DONE],
+    ["GET", `${CDN}/out.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+  ]);
+  await eventually(() => s.gens().length === 1, "the generation row");
+  assert.equal(s.placeholders()[0].status, "succeeded");
+  assert.equal(s.gens()[0].params.mode, "profile");
+  assert.equal(s.rec.wakes.length, 0);
+  await s.watchOnce();
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /finished: artifacts\/task-9\/masked-edit-501\.png/);
+});
+
+test("profile: a JSON-RPC error on the paid call says it may have been charged", async () => {
+  const s = await profileSetup({ gen: () => ({ rpcError: { code: -32603, message: "Internal error" } }) });
+  await assert.rejects(s.run({ tool: "write_text", arguments: { text: "hi" } }), (e) => e.ambiguous === true && /Internal error.*may have accepted and charged/.test(e.message));
+  assert.equal(s.rec.usage.length, 0);
+});
+
+test("profile SCHEMA_REVISION_MISMATCH: a failed reread asks to reread the schema; a tool gone from it is 'unavailable'", async () => {
+  // the reread fails: the tool may still be there, so no "pick another tool" with an empty list
+  let listed = 0;
+  let s = await profileSetup({
+    onPost: (req) => (req.json?.method === "tools/list" && listed++ > 0 ? new Response("boom", { status: 500 }) : null),
+    gen: () => refusal("schema_revision does not match", "SCHEMA_REVISION_MISMATCH"),
+  });
+  let r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+  assert.equal(r.status, "rejected");
+  assert.equal(r.charged, false);
+  assert.equal(r.error_code, "SCHEMA_REVISION_MISMATCH");
+  assert.equal(r.tools, undefined);
+  assert.match(r.hint, /read it again with loremax_workflows/);
+  nothingCharged(s);
+  restore();
+
+  // the tool left the profile meanwhile
+  let gone = false;
+  s = await profileSetup({
+    tools: () => structuredClone(FIXTURE.result.tools).filter((t) => !(gone && t.name === "write_text")),
+    gen: () => ((gone = true), refusal("schema_revision does not match", "SCHEMA_REVISION_MISMATCH")),
+  });
+  r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+  assert.equal(r.status, "rejected");
+  assert.deepEqual(r.tools, ["masked_edit", "styled_portrait"]);
+  assert.match(r.hint, /unavailable/);
+  nothingCharged(s);
+});
+
+test("profile: a single-output reply naming only result_url is saved, its extension from contentTypes", async () => {
+  const s = await profileSetup({
+    gen: () => ({ generationId: 903, status: "completed", tokensCost: 1, result_url: `${CDN}/single`, contentTypes: ["video/mp4"] }),
+    routes: [["GET", `${CDN}/single`, () => new Response("MP4")]],
+  });
+  const r = await s.run({ tool: "write_text", arguments: { text: "hi" } });
+  assert.equal(r.status, "completed");
+  assert.equal(r.artifacts.length, 1);
+  assert.match(r.artifacts[0], /\.mp4$/);
+});
+
+test("profile: bad tool or arguments are refused before anything is sent; note defaults to the prompt", async () => {
+  const s = await profileSetup({ gen: () => ({ generationId: 904, status: "completed", tokensCost: 1, textContent: "ok" }) });
+  await assert.rejects(s.run({ tool: "  ", arguments: {} }), /tool is required/);
+  await assert.rejects(s.run({ tool: "write_text", arguments: ["hi"] }), /arguments must be an object/);
+  assert.equal(s.f.calls.length, 0);
+  assert.equal(s.jobs.length, 0);
+  await s.run({ tool: "write_text", arguments: { text: "hi", prompt: "a fairy tale" } });
+  assert.equal(s.placeholders()[0].label, "a fairy tale");
+});
+
+test("a synchronous result whose save fails: the error comes back, the row stays for the watcher, which saves and wakes", async () => {
+  let failures = 1;
+  const s = await setup({
+    patch: (ctx) => {
+      const record = ctx.usage.record;
+      ctx.usage.record = (u) => {
+        if (failures-- > 0) throw new Error("usage store locked");
+        return record(u);
+      };
+    },
+  });
+  restore = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/now.png`] })],
+    ["POST", "/api/v2/generations/777/check", () => ({ status: "completed", result: { originalUrls: [`${CDN}/now.png`] } })],
+    ["GET", `${CDN}/now.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+  ]).restore;
+  await assert.rejects(s.run({ workflow_id: "w", inputs: {} }), /usage store locked/);
+  assert.equal(s.gens()[0].status, "running");
+  assert.equal(s.placeholders()[0].status, "succeeded");
+  await s.watchOnce();
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /generation 777 .*finished: artifacts\/task-9\/w-777\.png/);
+});
+
+test("a core with jobs but no wakeAgent: an unfinished wait points at loremax_result, never at a wake", async () => {
+  const s = await setup({ patch: (ctx) => delete ctx.wakeAgent });
+  restore = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => EXECUTE],
+    checkRoute(s, [{ status: "pending" }]),
+  ]).restore;
+  const r = await s.run({ workflow_id: "w", inputs: {}, wait_s: 10 });
+  assert.equal(r.status, "in_progress");
+  assert.match(r.hint, /call loremax_result/);
+  assert.doesNotMatch(r.hint, /WOKEN/);
 });
 
 test("older core: uploads that leave under 15 s abort before the paid call; a retry reuses the cached upload", async () => {

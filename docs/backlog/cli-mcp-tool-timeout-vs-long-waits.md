@@ -21,12 +21,12 @@ Codex's default `tool_timeout_sec` is believed to be 60 s, not confirmed.
 This plugin (0.2.0) no longer depends on the client waiting longer:
 
 - every tool call is capped at 50 s from its start (`MAX_WAIT_S`, index.mjs:41; `default_wait_s` 45, index.mjs:40),
-  and that budget covers catalog lookup, uploads, submission, polling in `waitFor` (index.mjs:1741), Retry-After
+  and that budget covers catalog lookup, uploads, submission, polling in `waitFor` (index.mjs:1784), Retry-After
   sleeps and downloads;
-- a paid submission that LoreMax has not answered in time is detached (`raceBudget`, index.mjs:1590): the call replies
-  `submitting`, the submission goes on in the background behind a `submit:<uuid>` placeholder row (index.mjs:1480),
+- a paid submission that LoreMax has not answered in time is detached (`raceBudget`, index.mjs:1633): the call replies
+  `submitting`, the submission goes on in the background behind a `submit:<uuid>` placeholder row (index.mjs:1504),
   and the agent is woken with the result; a save that would run past the deadline is detached the same way;
-- a restart mid-submission settles the placeholder and wakes the agent once (watcher, index.mjs:1858).
+- a restart mid-submission settles the placeholder and wakes the agent once (watcher, index.mjs:1901).
 
 Still to do in the host: set `tool_timeout_sec` (for example 1600 s) for the Bridex MCP server in `cliMcpConfig.ts`
 for codex, and pass a timeout to `callTool` in `mcpClient.ts` — or have the host pass an abort signal / "caller gone"

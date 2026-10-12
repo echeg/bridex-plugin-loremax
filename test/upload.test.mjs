@@ -320,9 +320,8 @@ test("upload: a refused ticket aborts everything — nothing was charged, no gen
   s.write("good.png", "g");
   s.write("bad.png", "b");
   await assert.rejects(s.upload("styled_portrait", { references: ["good.png", "bad.png"] }), (e) => e.charged === false && /mime refused — nothing was charged/.test(e.message));
-  assert.ok(s.sent().every((p) => p.name === "request_upload_url" || p.name === "finalize_upload"));
+  assert.equal(s.sent().filter((p) => p.name === "finalize_upload").length, 0);
   assert.equal(s.f.calls.filter((c) => c.method === "PUT").length, 0);
-
 });
 
 test("upload: a refused PUT aborts before finalize — nothing was charged", async () => {
