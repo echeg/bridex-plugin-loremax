@@ -742,6 +742,255 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
   return { resolveLocal, saveOutputs, finish };
 }
 
+/** The canonical MIME of a profile upload by (mediaType, ext): request_upload_url refuses one of another family. */
+const MIME_BY_MEDIA = {
+  image: Object.fromEntries(Object.entries(MIME_BY_EXT).filter(([, m]) => m.startsWith("image/"))),
+  video: { mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", mkv: "video/x-matroska", ts: "video/mp2t", m4v: "video/x-m4v" },
+  audio: { mp4: "audio/mp4", m4a: "audio/mp4", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", aac: "audio/aac", flac: "audio/flac" },
+  model: { glb: "model/gltf-binary", gltf: "model/gltf+json", obj: "model/obj", stl: "model/stl", usdz: "model/vnd.usdz+zip", fbx: "model/fbx" },
+};
+/** LoreMax's upload cap (MiB), whatever a slot allows. */
+const UPLOAD_CAP = 50 * 1024 * 1024;
+const MIB = 1024 * 1024;
+/** request_upload_url messages per POST (LoreMax batches ≤ 50); finalize_upload probes each object (~10 s), so its POSTs stay small. */
+const UPLOAD_BATCH = 50;
+const FINALIZE_FILES = 5;
+const FINALIZE_BYTES = 100 * MIB;
+const PUT_TIMEOUT_MS = 120_000;
+const PUT_CONCURRENCY = 4;
+/** Finalized URLs are reused for this long: a retried generation does not upload the same bytes again. */
+const UPLOAD_CACHE_TTL_MS = 3_600_000;
+const UPLOAD_CACHE_MAX = 2_000;
+
+/** Bytes for a reply: MiB once it is that big. */
+const sizeOf = (n) => (n >= MIB ? `${(n / MIB).toFixed(1)} MiB` : `${n} bytes`);
+const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+async function sha256File(abs) {
+  const h = crypto.createHash("sha256");
+  for await (const chunk of fs.createReadStream(abs)) h.update(chunk);
+  return h.digest("hex");
+}
+
+/** fn over items, at most `limit` at a time; the first failure rejects. */
+async function mapLimit(items, limit, fn) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await fn(items[next++]);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/**
+ * Workspace files for a profile tool's file arguments: checked against the
+ * tool's x-loremax-media and x-loremax-limits before any HTTP, then uploaded
+ * (request_upload_url → PUT → finalize_upload) and swapped for their finalized
+ * URLs. `cache` (sha256(key) + mediaType + sha256(file) → url) is process-wide.
+ */
+export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (globalThis[Symbol.for("bridex.loremax.uploads")] ??= new Map()) } = {}) {
+  /** A refused or failed upload: the generation was never sent. */
+  const refused = (e) => {
+    const err = e instanceof Error ? e : new Error(String(e));
+    if (!/nothing was charged/.test(err.message)) err.message = `${err.message} — nothing was charged`;
+    err.charged = false;
+    return err;
+  };
+  /** A reply that never arrived (timeout, dropped connection, gateway 5xx, missing batch message): the chunk is worth one more try. */
+  const lost = (e) => !e?.deadline && (e?.lost || e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError || e?.status >= 500);
+
+  function cacheGet(k) {
+    const hit = cache.get(k);
+    if (hit && now() - hit.at < UPLOAD_CACHE_TTL_MS) return hit.url;
+    if (hit) cache.delete(k);
+    return null;
+  }
+  function cacheSet(k, url) {
+    cache.delete(k);
+    cache.set(k, { url, at: now() });
+    // oldest first: a Map keeps insertion order
+    while (cache.size > UPLOAD_CACHE_MAX) cache.delete(cache.keys().next().value);
+  }
+
+  /** One batch of tool calls on the profile path → each call's data, in order. */
+  async function batch(name, argsList, opts) {
+    const path = lmx.profilePath();
+    const msgs = argsList.map((a) => ({ jsonrpc: "2.0", id: lmx.nextId(), method: "tools/call", params: { name, arguments: a } }));
+    const replies = await lmx.rpc(path, msgs, opts);
+    return msgs.map((m) => {
+      const r = replies.get(m.id);
+      if (!r) throw Object.assign(new Error(`loremax ${name}: no reply to this call`), { lost: true });
+      return lmx.toolResult(name, r);
+    });
+  }
+
+  /** request_upload_url and PUT for each item → item.assetId. */
+  async function stage(items, deadline) {
+    for (let i = 0; i < items.length; i += UPLOAD_BATCH) {
+      const part = items.slice(i, i + UPLOAD_BATCH);
+      // the upload tools are strict: no on_behalf_of, no api_key
+      const tickets = await batch("request_upload_url", part.map((it) => ({ filename: it.filename, mime: it.mime, media_type: it.mediaType, size_hint: it.size })), { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
+      tickets.forEach((t, j) => {
+        if (typeof t?.asset_id !== "string" || typeof t?.upload_url !== "string") throw new Error(`loremax request_upload_url for ${part[j].shown}: no asset_id/upload_url in the reply`);
+        part[j].ticket = t;
+      });
+    }
+    await mapLimit(items, PUT_CONCURRENCY, async (it) => {
+      const left = deadline == null ? Infinity : deadline - now();
+      if (left <= 0) throw deadlineError(`upload of ${it.shown}`);
+      const buf = fs.readFileSync(it.abs);
+      if (buf.length !== it.size) throw new Error(`${it.shown} changed while it was being uploaded`);
+      let res;
+      try {
+        // exactly the signed headers: Content-Type and Content-Length are bound to the ticket
+        res = await fetch(it.ticket.upload_url, { method: "PUT", headers: { ...(isObj(it.ticket.headers) ? it.ticket.headers : {}) }, body: buf, signal: AbortSignal.timeout(Math.min(PUT_TIMEOUT_MS, left)) });
+        await res.body?.cancel();
+      } catch (e) {
+        if (left < PUT_TIMEOUT_MS && e?.name === "TimeoutError") throw deadlineError(`upload of ${it.shown}`);
+        throw e;
+      }
+      if (!res.ok) throw httpError(`loremax upload of ${it.shown} failed (HTTP ${res.status})`, res.status, "");
+      it.assetId = it.ticket.asset_id;
+    });
+  }
+
+  /** finalize_upload for one chunk → item.url; the server reads and probes every object, so the timeout grows with the chunk. */
+  async function finalize(chunk, deadline) {
+    const bytes = chunk.reduce((n, it) => n + it.size, 0);
+    const timeoutMs = 15_000 + 10_000 * chunk.length + Math.ceil(bytes / (10 * MIB)) * 1000;
+    const done = await batch("finalize_upload", chunk.map((it) => ({ asset_id: it.assetId })), { timeoutMs, deadline });
+    done.forEach((f, j) => {
+      if (typeof f?.url !== "string" || !/^https:\/\//.test(f.url)) throw new Error(`loremax finalize_upload for ${chunk[j].shown}: no url in the reply`);
+      chunk[j].url = f.url;
+    });
+  }
+
+  /** Items → finalize chunks of ≤ FINALIZE_FILES files and ≤ FINALIZE_BYTES (one file always fits). */
+  function chunksOf(items) {
+    const out = [];
+    let cur = [];
+    let bytes = 0;
+    for (const it of items) {
+      if (cur.length && (cur.length >= FINALIZE_FILES || bytes + it.size > FINALIZE_BYTES)) {
+        out.push(cur);
+        cur = [];
+        bytes = 0;
+      }
+      cur.push(it);
+      bytes += it.size;
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
+  /**
+   * The tool's file arguments in `args` (a workspace path, or a list of them for
+   * an array slot) → `{ arguments, references }`: the arguments with each path
+   * replaced by its finalized URL in place, and the workspace paths in order. An
+   * https:// value passes through (LoreMax accepts only its own finalized URLs).
+   * Everything is checked before the first request; any failure throws with
+   * `charged: false` — the generation was never sent.
+   */
+  async function uploadFiles(call, tool, args, { deadline } = {}) {
+    try {
+      const out = { ...(args ?? {}) };
+      const references = [];
+      /** Every position, in argument order: a local file or a URL passed through. */
+      const positions = [];
+      /** The file arguments given, to put the URLs back in their places. */
+      const slots = [];
+      for (const fa of tool.fileArgs ?? []) {
+        let v = out[fa.name];
+        if (v == null || v === "" || (Array.isArray(v) && !v.length)) continue;
+        const where = `${tool.name}.${fa.name}`;
+        if (fa.cardinality === "array") {
+          // one path for a list slot is a list of one
+          if (!Array.isArray(v)) v = [v];
+          const prop = tool.agentSchema?.properties?.[fa.name] ?? {};
+          if (Number.isFinite(prop.maxItems) && v.length > prop.maxItems) throw new Error(`${where} takes at most ${prop.maxItems} files, got ${v.length}`);
+          if (Number.isFinite(prop.minItems) && v.length < prop.minItems) throw new Error(`${where} takes at least ${prop.minItems} files, got ${v.length}`);
+        } else if (Array.isArray(v)) {
+          throw new Error(`${where} takes one file path, not a list of ${v.length}`);
+        }
+        const list = Array.isArray(v) ? v : [v];
+        const formats = (fa.acceptedFormats ?? []).map((f) => String(f).toLowerCase());
+        const maxMb = Number(fa.constraints?.maxFileSizeMb);
+        const cap = Math.min(UPLOAD_CAP, Number.isFinite(maxMb) && maxMb > 0 ? maxMb * MIB : Infinity);
+        const slot = list.map((p) => {
+          if (typeof p !== "string" || !p.trim()) throw new Error(`${where} takes workspace paths, got ${JSON.stringify(p)?.slice(0, 100)}`);
+          const pos = { fa, value: p };
+          positions.push(pos);
+          if (/^https:\/\//i.test(p)) return pos;
+          if (/^[a-z][a-z0-9+.-]*:/i.test(p)) throw new Error(`${where}: "${p.slice(0, 200)}" is neither a workspace path nor a finalized LoreMax https URL`);
+          const abs = outputs.resolveLocal(call.workspace, p);
+          const ext = path.extname(abs).slice(1).toLowerCase();
+          if (formats.length && !formats.includes(ext)) throw new Error(`${where}: ${p} is .${ext || "(none)"}; this argument accepts ${formats.join(", ")}`);
+          const mime = MIME_BY_MEDIA[fa.mediaType]?.[ext];
+          if (!mime) throw new Error(`${where}: ${p} — .${ext || "(none)"} is not a supported ${fa.mediaType} format`);
+          const size = fs.statSync(abs).size;
+          if (size > cap) throw new Error(`${where}: ${p} is ${sizeOf(size)}; this argument takes up to ${sizeOf(cap)} per file`);
+          Object.assign(pos, { abs, ext, mime, size });
+          references.push(p);
+          return pos;
+        });
+        slots.push({ name: fa.name, list: Array.isArray(v), slot });
+      }
+      if (!positions.length) return { arguments: out, references };
+
+      // identical bytes are one upload (and count once against the byte budget, as on the server)
+      const shaByAbs = new Map();
+      for (const pos of positions) {
+        if (!pos.abs) continue;
+        if (!shaByAbs.has(pos.abs)) shaByAbs.set(pos.abs, await sha256File(pos.abs));
+        pos.sha = shaByAbs.get(pos.abs);
+      }
+      const lim = tool.limits ?? {};
+      const images = positions.filter((p) => p.fa.mediaType === "image" && p.fa.role !== "mask").length;
+      const uniqueBytes = [...new Map(positions.filter((p) => p.sha).map((p) => [p.sha, p.size])).values()].reduce((a, b) => a + b, 0);
+      if (Number.isFinite(lim.maxImagePositions) && images > lim.maxImagePositions) throw new Error(`${tool.name}: ${images} images (masks aside); this tool takes at most ${lim.maxImagePositions} per call`);
+      if (Number.isFinite(lim.maxMediaPositions) && positions.length > lim.maxMediaPositions) throw new Error(`${tool.name}: ${positions.length} files; this tool takes at most ${lim.maxMediaPositions} per call`);
+      if (Number.isFinite(lim.maxTotalBytes) && uniqueBytes > lim.maxTotalBytes) throw new Error(`${tool.name}: the files add up to ${sizeOf(uniqueBytes)}; this tool takes at most ${sizeOf(lim.maxTotalBytes)} per call`);
+
+      const keyHash = sha256(lmx.key());
+      const items = new Map();
+      for (const pos of positions) {
+        if (!pos.abs) continue;
+        const k = `${keyHash}:${pos.fa.mediaType}:${pos.sha}`;
+        pos.url = cacheGet(k);
+        if (pos.url) continue;
+        if (!items.has(k)) items.set(k, { key: k, abs: pos.abs, shown: pos.value, filename: path.basename(pos.abs), mime: pos.mime, mediaType: pos.fa.mediaType, size: pos.size, positions: [] });
+        items.get(k).positions.push(pos);
+      }
+      const todo = [...items.values()];
+      if (todo.length) {
+        await stage(todo, deadline);
+        for (const chunk of chunksOf(todo)) {
+          try {
+            await finalize(chunk, deadline);
+          } catch (e) {
+            if (!lost(e)) throw e;
+            // the finalize reply was lost: the same bytes again (LoreMax dedupes to the same asset), this chunk only
+            ctx.log.warn(`loremax finalize_upload lost (${e?.message ?? e}) — uploading ${chunk.length} file(s) again`);
+            await stage(chunk, deadline);
+            await finalize(chunk, deadline);
+          }
+          for (const it of chunk) {
+            cacheSet(it.key, it.url);
+            for (const pos of it.positions) pos.url = it.url;
+          }
+        }
+      }
+      for (const { name, list, slot } of slots) {
+        const urls = slot.map((pos) => pos.url ?? pos.value);
+        out[name] = list ? urls : urls[0];
+      }
+      return { arguments: out, references };
+    } catch (e) {
+      throw refused(e);
+    }
+  }
+
+  return { uploadFiles };
+}
+
 /** The wake line for a finished generation: saved paths, and the URLs left on the CDN (paid for all the same). */
 function savedList(done) {
   const saved = done.artifacts.map((a) => `artifacts/${a}`).join(", ");

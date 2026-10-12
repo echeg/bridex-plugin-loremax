@@ -304,26 +304,26 @@
 - ➕ the list hint and "no such tool" are plain errors/replies like REST mode's (an unknown tool throws); over `REPLY_CAP` the description shrinks to 300 chars and `how_to_call` to a one-line form; the grown cap is measured on the schema as indented in the reply; `loremax_generate` keeps the Task 3 placeholder until Task 8
 
 ### Task 7: Upload workspace files for file arguments
-- [ ] add `uploadFiles(call, tool, args, {deadline})`. For each `fileArgs` entry whose value is a path or an array of paths:
+- [x] add `uploadFiles(call, tool, args, {deadline})`. For each `fileArgs` entry whose value is a path or an array of paths:
   - apply `resolveLocal` (the path jail);
   - check the extension against `acceptedFormats`;
   - check the size against `constraints` and ≤ 50 MiB;
   - check the array length against `cardinality`.
 
   Before any upload, check the totals against `limits`: non-mask image positions, all positions, and unique bytes. An `https://` value is passed through unchanged; the server accepts only finalized same-organization URLs.
-- [ ] MIME by `(mediaType, ext)`:
+- [x] MIME by `(mediaType, ext)`:
   - audio: mp4/m4a→`audio/mp4`, mp3→`audio/mpeg`, wav→`audio/wav`, ogg→`audio/ogg`, aac→`audio/aac`, flac→`audio/flac`;
   - video: mp4→`video/mp4`, mov→`video/quicktime`, webm→`video/webm`, mkv→`video/x-matroska`, ts→`video/mp2t`, m4v→`video/x-m4v`;
   - images: the existing map;
   - models: canonical `model/*` (glb `model/gltf-binary`, gltf `model/gltf+json`, obj `model/obj`, stl `model/stl`, usdz `model/vnd.usdz+zip`, fbx `model/fbx`).
-- [ ] dedupe identical files within the call by sha256, then upload:
+- [x] dedupe identical files within the call by sha256, then upload:
   1. `request_upload_url {filename, mime, media_type, size_hint: exact size}` in batches of ≤ 50 messages — no `on_behalf_of` and no `api_key` on any upload tool (they reject `on_behalf_of`);
   2. `PUT` each file with exactly the returned headers;
   3. `finalize_upload {asset_id}` in small chunks (≤ 5 files or ≤ 100 MiB per POST) with an rpc timeout scaled to the chunk bytes.
 
   A lost or timed-out finalize chunk re-uploads only its own files (server dedup returns the same asset). Replace the paths with the returned `url` values in their original order.
-- [ ] cache `sha256(apiKey) + mediaType + sha256(file) → finalized url` in memory for ~1 h per process to skip repeat uploads. Any upload failure aborts before generation with "nothing was charged".
-- [ ] write tests in a new `test/upload.test.mjs`:
+- [x] cache `sha256(apiKey) + mediaType + sha256(file) → finalized url` in memory for ~1 h per process to skip repeat uploads. Any upload failure aborts before generation with "nothing was charged".
+- [x] write tests in a new `test/upload.test.mjs`:
   - single and array args;
   - format, size and `limits` rejection before any HTTP call;
   - jail escape rejected;
@@ -335,7 +335,8 @@
   - a cache hit skips the upload, and a key change misses;
   - an https URL passes through;
   - a partial failure makes no generation call.
-- [ ] run `npm test` - must pass before task 8
+- [x] run `npm test` - must pass before task 8
+- ➕ API: `createUploader(ctx, lmx, outputs, {now, cache})` → `uploadFiles(call, tool, args, {deadline})` returns `{arguments, references}` (the workspace paths in argument order, for provenance); the cache is process-wide (`globalThis` symbol, ≤ 2000 entries); an array slot takes a single path as a list of one, `maxItems`/`minItems` of the slot are checked, a non-https URL scheme is refused; every failure carries `charged: false` and a deadline failure also `deadline: true` (for Task 8's "uploads are cached — call again"); a finalize chunk counts as lost on a timeout, dropped connection, 5xx or a reply missing from the batch, never on a tool error
 
 ### Task 8: `loremax_generate` in profile mode
 - [ ] in profile mode register `loremax_generate` with schema `{tool: string, arguments: record, wait_s?, note?}` and a mode-specific description: paid per call; read the tool with `loremax_workflows` first; file arguments take workspace paths.
