@@ -374,10 +374,11 @@
 - ➕ profile job params also keep `profile` (the publicId) so provenance after a restart names the profile the job ran on; the REST and profile handlers share `raceBudget` / `landed` / `settleLate(ph, outcome, accept, explain)`, and `unanswered(e, what)` is the one "outcome unknown" rule for both paid calls
 
 ### Task 9: Health check and balance tile in profile mode
-- [ ] in profile mode call `get_balance` on the profile path (same key) for `registerCheck`/`registerStat`, and make the check also report the number of generation tools from `tools/list` ("profile reachable, N tools")
-- [ ] fail the check with the three-cause hint on `PROFILE_NOT_FOUND`, and with the config error for an invalid `profile_url`
-- [ ] write tests in `test/result-watcher.test.mjs` (or a new `test/health.test.mjs`): profile check ok, 404 profile, invalid config, empty balance, REST mode unchanged
-- [ ] run `npm test` - must pass before task 10
+- [x] in profile mode call `get_balance` on the profile path (same key) for `registerCheck`/`registerStat`, and make the check also report the number of generation tools from `tools/list` ("profile reachable, N tools")
+- [x] fail the check with the three-cause hint on `PROFILE_NOT_FOUND`, and with the config error for an invalid `profile_url`
+- [x] write tests in `test/result-watcher.test.mjs` (or a new `test/health.test.mjs`): profile check ok, 404 profile, invalid config, empty balance, REST mode unchanged
+- [x] run `npm test` - must pass before task 10
+- ➕ the check rereads the catalog (`force`) rather than trusting the cache; a reachable profile with no generation tools fails with "add workflows to the profile"; the stat tile returns `[]` for an invalid `profile_url`; tests live in the new `test/health.test.mjs`
 
 ### Task 10: Verify acceptance criteria
 - [ ] verify the Overview items:

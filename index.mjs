@@ -1854,15 +1854,37 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     ctx.onShutdown?.(() => clearInterval(watcher));
   }
 
+  /**
+   * get_balance on the endpoint of the mode: the profile path in profile mode
+   * (same key, and it proves the profile answers), else /api/mcp. An invalid
+   * profile_url throws its config error before any HTTP.
+   */
+  const balance = (opts) => {
+    if (profile?.error) throw profile.error;
+    return profile ? lmx.toolCall(profile.path, "get_balance", {}, opts) : lmx.mcpCall("get_balance", {}, opts);
+  };
+
   ctx.registerCheck?.(async () => {
+    if (profile?.error) return { ok: false, message: profile.error.message };
     if (!lmx.hasKey()) return { ok: false, message: "no key: LOREMAX_API_KEY is not set" };
     try {
-      const b = await lmx.mcpCall("get_balance", {}, { timeoutMs: 15_000 });
+      const b = await balance({ timeoutMs: 15_000 });
       const remaining = Number(b?.remaining);
+      if (!profile) {
+        return remaining > 0
+          ? { ok: true, message: `key works · ${remaining} tk left` }
+          : { ok: false, message: "key works, but the balance is empty — top up LoreMax" };
+      }
+      // the check is the one place a person asks "is it set up?": reread the catalog, not the cached one
+      const n = (await catalog.get({ force: true, deadline: now() + 15_000 })).tools.size;
+      const reach = `profile reachable, ${n} tool${n === 1 ? "" : "s"}`;
+      if (n === 0) return { ok: false, message: `${reach} — add workflows to the profile in LoreMax → Organization → MCP` };
       return remaining > 0
-        ? { ok: true, message: `key works · ${remaining} tk left` }
-        : { ok: false, message: "key works, but the balance is empty — top up LoreMax" };
+        ? { ok: true, message: `${reach} · ${remaining} tk left` }
+        : { ok: false, message: `${reach}, but the balance is empty — top up LoreMax` };
     } catch (e) {
+      // the 404 message already names the three causes and the fix
+      if (e?.code === "PROFILE_NOT_FOUND") return { ok: false, message: e.message };
       return { ok: false, message: `LoreMax refused the key (${e?.status ?? short(e?.message ?? e)})` };
     }
   });
@@ -1870,10 +1892,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // dashboard balance tile; polled by the UI, so cached a minute
   let balanceCache = { at: -Infinity, tiles: [] };
   ctx.registerStat?.(async () => {
-    if (!lmx.hasKey()) return [];
+    if (!lmx.hasKey() || profile?.error) return [];
     if (now() - balanceCache.at < BALANCE_TTL_MS) return balanceCache.tiles;
     try {
-      const b = await lmx.mcpCall("get_balance", {}, { timeoutMs: 2_500 });
+      const b = await balance({ timeoutMs: 2_500 });
       const remaining = Number(b?.remaining);
       if (!Number.isFinite(remaining)) return [];
       const limit = Number(b?.limit);
