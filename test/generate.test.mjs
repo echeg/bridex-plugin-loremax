@@ -1225,9 +1225,14 @@ test("profile: bad tool or arguments are refused before anything is sent; note d
   assert.equal(s.placeholders()[0].label, "a fairy tale");
 });
 
-test("a synchronous result whose save fails: the error comes back, the row stays for the watcher, which saves and wakes", async () => {
+/** The REST check of today's deployed LoreMax for a synchronous row (before b517f36e). */
+const SYNC_CHECK_400 = ["POST", "/api/v2/generations/777/check", () => new Response("synchronous generation", { status: 400 })];
+
+/** activate whose first usage.record throws, as a save that fails after the downloads. */
+const failingFirstSave = (opts = {}) => {
   let failures = 1;
-  const s = await setup({
+  return setup({
+    ...opts,
     patch: (ctx) => {
       const record = ctx.usage.record;
       ctx.usage.record = (u) => {
@@ -1236,11 +1241,16 @@ test("a synchronous result whose save fails: the error comes back, the row stays
       };
     },
   });
-  restore = mockFetch([
+};
+
+test("a synchronous result whose save fails: the error comes back, the row stays for the watcher, which saves and wakes — never /check", async () => {
+  const s = await failingFirstSave();
+  const f = mockFetch([
     ["POST", "/api/v2/workflow/execute", () => ({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/now.png`] })],
-    ["POST", "/api/v2/generations/777/check", () => ({ status: "completed", result: { originalUrls: [`${CDN}/now.png`] } })],
+    SYNC_CHECK_400,
     ["GET", `${CDN}/now.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
-  ]).restore;
+  ]);
+  restore = f.restore;
   await assert.rejects(s.run({ workflow_id: "w", inputs: {} }), /usage store locked/);
   assert.equal(s.gens()[0].status, "running");
   assert.equal(s.placeholders()[0].status, "succeeded");
@@ -1249,6 +1259,29 @@ test("a synchronous result whose save fails: the error comes back, the row stays
   assert.equal(s.rec.usage.length, 1);
   assert.equal(s.rec.wakes.length, 1);
   assert.match(s.rec.wakes[0].prompt, /generation 777 .*finished: artifacts\/task-9\/w-777\.png/);
+  assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
+});
+
+test("a synchronous result whose save failed, then a restart: the row's params carry the outputs — loremax_result saves them, never /check", async () => {
+  const s = await failingFirstSave();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 777, status: "completed", tokensCost: 5, originalUrls: [`${CDN}/now.png`] })],
+    SYNC_CHECK_400,
+    ["GET", `${CDN}/now.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+  ]);
+  restore = f.restore;
+  await assert.rejects(s.run({ workflow_id: "w", inputs: { prompt: "p" } }), /usage store locked/);
+  assert.deepEqual(s.gens()[0].result.params.syncResult.originalUrls, [`${CDN}/now.png`]);
+  // a restart: a fresh activation knows the generation only from its row
+  await activate(s.ctx, { pollMs: 1, now: () => s.clock.t, sleep: s.time.sleep });
+  const result = s.rec.tools.get("loremax_result");
+  const reply = JSON.parse((await result.handler({ generation_id: "777" }, CALL)).content[0].text);
+  assert.equal(reply.status, "completed");
+  assert.deepEqual(reply.artifacts, ["task-9/w-777.png"]);
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.equal(s.rec.usage.length, 1);
+  assert.equal(s.rec.usage[0].units, 5);
+  assert.equal(f.calls.some((c) => c.url.includes("/check")), false);
 });
 
 test("a core with jobs but no wakeAgent: an unfinished wait points at loremax_result, never at a wake", async () => {

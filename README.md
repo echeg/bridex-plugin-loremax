@@ -196,7 +196,8 @@ A generation that completes with less than ~10 s left, or whose downloads are
 still running at the deadline, is saved in the background and the agent is
 woken with the files. A synchronous result saved this way is tracked under its
 own generation id too, so `loremax_result` finds it once it is saved, and a
-save that fails is retried by the watcher. On older cores without `ctx.jobs` / `ctx.wakeAgent`
+save that fails (or a restart mid-download) is retried by the watcher from the
+outputs kept on the job row, never through `/check`. On older cores without `ctx.jobs` / `ctx.wakeAgent`
 nothing is detached: the submission blocks as in 0.1.0 (only polling respects
 the budget), and in profile mode a call whose uploads leave less than 15 s is
 stopped before the paid request, with "nothing was charged; uploads are cached

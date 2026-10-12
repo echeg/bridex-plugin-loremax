@@ -1085,10 +1085,23 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       workflow: row?.model ?? "",
       // a submission placeholder's params describe no generation
       ...(p && typeof p === "object" && !p.submitting
-        ? { inputs: p.mode === "profile" ? profileInputs(p) : p.inputs ?? {}, references: p.references ?? [], tokensCost: Number(p.tokensCost) || 0, note: p.note ?? "" }
+        ? {
+          inputs: p.mode === "profile" ? profileInputs(p) : p.inputs ?? {},
+          references: p.references ?? [],
+          tokensCost: Number(p.tokensCost) || 0,
+          note: p.note ?? "",
+          ...(p.syncResult ? { syncResult: p.syncResult } : {}),
+        }
         : fromJobLabel(row?.label)),
     };
   };
+  /**
+   * One status read of a tracked generation. A synchronous one is never sent to
+   * /check (the deployed REST check may still answer 400 for it): its row keeps
+   * the execute reply's outputs, and those are what a retried save uses.
+   */
+  const statusOf = (job, opts) =>
+    job.syncResult ? { status: "completed", result: job.syncResult, fromReply: true } : lmx.check(job.generationId, opts);
   /**
    * Generation ids a tool call or the watcher is polling right now: the others
    * leave them alone so one generation is never downloaded and settled twice.
@@ -1488,9 +1501,12 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         model: job.workflow,
         label: jobLabel(job.note, job.tokensCost),
         // kept with the job row on newer cores (older ones ignore it): a restart keeps the provenance
-        params: job.mode === "profile"
-          ? { mode: "profile", tool: job.tool, arguments: job.arguments, references: job.references, tokensCost: job.tokensCost, note: job.note, identity: job.identity, profile: job.profile }
-          : { inputs: job.inputs, references: job.references, tokensCost: job.tokensCost, note: job.note },
+        params: {
+          ...(job.mode === "profile"
+            ? { mode: "profile", tool: job.tool, arguments: job.arguments, references: job.references, tokensCost: job.tokensCost, note: job.note, identity: job.identity, profile: job.profile }
+            : { inputs: job.inputs, references: job.references, tokensCost: job.tokensCost, note: job.note }),
+          ...(job.syncResult ? { syncResult: job.syncResult } : {}),
+        },
       })
       : null;
     generations.set(job.generationId, job);
@@ -1562,6 +1578,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     const { generationId } = job;
     // loremax_result answers "being saved" meanwhile, and nothing else saves it
     inFlight.add(generationId);
+    // a retried save (watcher, loremax_result) reads these from the row, never /check
+    job.syncResult = result;
     try {
       adopt(ph, job);
       const done = await outputs.finish(ph.call, job, { result, fromReply: true });
@@ -1791,7 +1809,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       for (;;) {
         let c;
         try {
-          c = await lmx.check(generationId, { deadline });
+          c = await statusOf(job, { deadline });
         } catch (e) {
           // out of time (a request cut short, a Retry-After that does not fit): hand back, not a failure
           if (e?.deadline) break;
@@ -1905,15 +1923,15 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           const expired = now() - Date.parse(j.createdAt) > GIVE_UP_MS;
           // ask LoreMax even past 6h: a job that finished while Bridex was down is
           // paid for and must still be saved — only a still-pending (or unreachable) one is given up
+          const job = { ...(generations.get(j.externalId) ?? fromRow(j.externalId, j, cur)), trackedId: j.id };
           let c = null;
           try {
-            c = await lmx.check(j.externalId);
+            c = await statusOf(job);
           } catch (e) {
             if (!expired) throw e;
             ctx.log.warn(`loremax job ${j.externalId}: ${e?.message ?? e}`);
           }
           if (c?.status === "completed") {
-            const job = { ...(generations.get(j.externalId) ?? fromRow(j.externalId, j, cur)), trackedId: j.id };
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
             const done = await outputs.finish(call, job, c);
             generations.delete(j.externalId);
