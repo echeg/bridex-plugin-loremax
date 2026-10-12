@@ -458,3 +458,51 @@ test("watcher: outputs that could not be downloaded are named in the wake prompt
   assert.match(prompt, new RegExp(`still on LoreMax's CDN: ${CDN}/out\\.png`));
   assert.doesNotMatch(prompt, /returned no files/);
 });
+
+test("watcher: a submit: placeholder left by a dead process is settled failed and woken once, never checked", async () => {
+  const s = await setup();
+  s.track({ externalId: "submit:7d3c", model: "kling", label: "hero", params: { submitting: true, mode: "rest", workflow: "kling", note: "hero" } });
+  // the restarted process: a fresh activation whose inFlight never held the placeholder
+  globalThis[Symbol.for("bridex.loremax.inFlight")]?.delete("submit:7d3c");
+  const fresh = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+  const f = mockFetch([]);
+  restore = f.restore;
+  await fresh.watchOnce();
+  assert.equal(f.calls.length, 0);
+  assert.equal(s.jobs[0].status, "failed");
+  assert.match(s.jobs[0].error, /interrupted by a restart/);
+  assert.equal(s.rec.wakes.length, 1);
+  assert.equal(s.rec.wakes[0].sessionKey, "sess-1");
+  assert.match(s.rec.wakes[0].prompt, /LoreMax kling \(hero\): the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again \(task task-9\)/);
+  await fresh.watchOnce();
+  assert.equal(s.rec.wakes.length, 1);
+  // loremax_result does not treat it as a generation
+  await assert.rejects(s.run({ generation_id: "submit:7d3c" }), /not started from this workspace/);
+});
+
+test("watcher: a submit: placeholder a running submission still holds is left alone", async () => {
+  const s = await setup();
+  s.track({ externalId: "submit:live", params: { submitting: true } });
+  const inFlight = globalThis[Symbol.for("bridex.loremax.inFlight")];
+  inFlight.add("submit:live");
+  try {
+    const f = mockFetch([]);
+    restore = f.restore;
+    await s.watchOnce();
+    assert.equal(f.calls.length, 0);
+    assert.equal(s.jobs[0].status, "running");
+    assert.equal(s.rec.wakes.length, 0);
+  } finally {
+    inFlight.delete("submit:live");
+  }
+});
+
+test("loremax_result: wait_s 0 still does one check and saves a completed generation inline", async () => {
+  const s = await setup();
+  s.track();
+  const f = mockFetch([checkRoute(s, [DONE]), PNG]);
+  restore = f.restore;
+  const reply = await s.run({ generation_id: "501", wait_s: 0 });
+  assert.equal(reply.status, "completed");
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/check")).length, 1);
+});

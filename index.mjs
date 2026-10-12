@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -14,7 +15,7 @@ import path from "node:path";
  *       config:
  *         api_key: ${LOREMAX_API_KEY}     # optional; this is the default
  *         base_url: ${LOREMAX_BASE_URL}   # optional; this is the default (the credential must be set: requires_env)
- *         default_wait_s: 180             # how long loremax_generate waits before handing back a generation_id
+ *         default_wait_s: 45              # how long loremax_generate waits before handing back (10..50 s)
  *         usd_per_token: 0.001            # optional; tokens → USD for the spend charts
  */
 
@@ -30,6 +31,14 @@ const DOWNLOAD_CAP = 512 * 1024 * 1024;
 const REF_CAP = 20 * 1024 * 1024;
 const MAX_REFS = 20;
 const POLL_MS = 3_000;
+/**
+ * Bridex agents' MCP client gives up on a tool call after 60 s, while the handler
+ * goes on unseen: no call may run past 50 s from its start, and a finished
+ * generation is saved inline only with this much of it left (downloads take time).
+ */
+const DEFAULT_WAIT_S = 45;
+const MAX_WAIT_S = 50;
+const FINISH_RESERVE_MS = 10_000;
 /** The reboot-proof watcher's pass over pending jobs, and when it gives a generation up. */
 const WATCH_MS = 15_000;
 const GIVE_UP_MS = 6 * 3_600_000;
@@ -45,7 +54,25 @@ const MIME_BY_EXT = Object.fromEntries(Object.entries(EXT_BY_MIME).map(([m, e]) 
 MIME_BY_EXT.jpeg = "image/jpeg";
 
 const resolveRef = (ref) => String(ref ?? "").replace(/\$\{([A-Z0-9_]+)\}/g, (_, n) => process.env[n] ?? "");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** A timer that an aborted signal ends early (and clears, so a lost race leaves no timer behind). */
+const realSleep = (ms, signal) =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(t);
+      resolve();
+    }, { once: true });
+  });
+
+/** wait_s from a tool call → seconds in lo..MAX_WAIT_S (the test zod is a no-op: bounds live here). */
+function waitSeconds(v, lo, fallback) {
+  const n = v == null || v === "" ? NaN : Number(v);
+  return Number.isFinite(n) ? Math.min(Math.max(n, lo), MAX_WAIT_S) : fallback;
+}
+
+/** Out of the tool call's time budget: the caller hands back what it has instead of failing. */
+const deadlineError = (p) => Object.assign(new Error(`loremax ${p}: out of time for this tool call`), { deadline: true });
 
 /** Retry-After in seconds (the HTTP-date form is not used by LoreMax) → ms, capped. */
 function retryAfterMs(header) {
@@ -64,11 +91,11 @@ function httpError(message, status, body) {
  * and the stateless MCP endpoint (/api/mcp, Bearer) for what REST lacks —
  * workflow details, pricing, balance.
  */
-export function createClient(ctx) {
+export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   const cfg = {
     api_key: "${LOREMAX_API_KEY}",
     base_url: "${LOREMAX_BASE_URL}",
-    default_wait_s: 180,
+    default_wait_s: DEFAULT_WAIT_S,
     usd_per_token: 0,
     ...(ctx.config ?? {}),
   };
@@ -92,7 +119,7 @@ export function createClient(ctx) {
   // the host leaves config validation to the plugin: an emptied or bogus value means the default, not "no wait"
   const defaultWaitS = () => {
     const v = Number(cfg.default_wait_s);
-    return Number.isFinite(v) && v > 0 ? Math.min(Math.max(v, 10), 1500) : 180;
+    return Number.isFinite(v) && v > 0 ? Math.min(Math.max(v, 10), MAX_WAIT_S) : DEFAULT_WAIT_S;
   };
 
   // an empty balance: one needs-a-person card in the inbox, not a silent failed run
@@ -100,18 +127,33 @@ export function createClient(ctx) {
   const outOfFunds = (detail) =>
     ctx.billing?.outOfFunds?.({ provider: "LoreMax", what: "image and video generation (loremax plugin)", detail: String(detail).slice(0, 400) });
 
-  async function restJson(p, init = {}, timeoutMs = 60_000) {
+  /** `deadline` (epoch ms, optional) ends the request and any Retry-After wait by then. */
+  async function restJson(p, init = {}, { timeoutMs = 60_000, deadline } = {}) {
     const url = `${baseUrl()}${p}`;
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(url, {
-        ...init,
-        headers: { "X-API-Key": key(), ...(init.headers ?? {}) },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      const body = await res.text();
+      const left = deadline == null ? Infinity : deadline - now();
+      if (left <= 0) throw deadlineError(p);
+      const ms = Math.min(timeoutMs, left);
+      let res;
+      let body;
+      try {
+        res = await fetch(url, {
+          ...init,
+          headers: { "X-API-Key": key(), ...(init.headers ?? {}) },
+          signal: AbortSignal.timeout(ms),
+        });
+        body = await res.text();
+      } catch (e) {
+        // cut short by the deadline, not by the request's own timeout
+        if (ms < timeoutMs && e?.name === "TimeoutError") throw deadlineError(p);
+        throw e;
+      }
       if (res.status === 429) {
         if (attempt === 0) {
-          await sleep(retryAfterMs(res.headers.get("retry-after")));
+          const wait = retryAfterMs(res.headers.get("retry-after"));
+          // a wait that does not fit before the deadline is not slept
+          if (deadline != null && now() + wait > deadline) throw deadlineError(p);
+          await sleep(wait);
           continue;
         }
         throw httpError(`loremax 429 ${p}: rate limited (LoreMax allows 60/min, 1000/h) — ${body.slice(0, 200)}`, 429, body);
@@ -174,9 +216,9 @@ export function createClient(ctx) {
   }
 
   /** One /check of a generation; LoreMax answers a failed one with HTTP 500 and `status: "failed"` in the body. */
-  async function check(generationId) {
+  async function check(generationId, { deadline } = {}) {
     try {
-      return await restJson(`/api/v2/generations/${encodeURIComponent(generationId)}/check`, { method: "POST" }, 30_000);
+      return await restJson(`/api/v2/generations/${encodeURIComponent(generationId)}/check`, { method: "POST" }, { timeoutMs: 30_000, deadline });
     } catch (e) {
       let body;
       try {
@@ -393,9 +435,21 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
   return { resolveLocal, saveOutputs, finish };
 }
 
-/** `opts` is for tests only (the host passes just ctx): poll interval and clock. */
-export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now } = {}) {
-  const lmx = createClient(ctx);
+/** The wake line for a finished generation: saved paths, and the URLs left on the CDN (paid for all the same). */
+function savedList(done) {
+  const saved = done.artifacts.map((a) => `artifacts/${a}`).join(", ");
+  const onCdn = done.left_on_cdn?.length
+    ? `not downloaded (failed or over the size cap), still on LoreMax's CDN: ${done.left_on_cdn.join(", ")}`
+    : "";
+  return [saved, onCdn].filter(Boolean).join("; ") || "(LoreMax returned no files)";
+}
+
+/** A placeholder job row stands for a paid submission still under way: `submit:<uuid>`, never a generation. */
+const isSubmitRow = (externalId) => String(externalId ?? "").startsWith("submit:");
+
+/** `opts` is for tests only (the host passes just ctx): poll interval, clock and sleep. */
+export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, sleep = realSleep } = {}) {
+  const lmx = createClient(ctx, { now, sleep });
   const outputs = createOutputs(ctx, lmx);
   /**
    * What finish needs beyond the job row, by LoreMax generation id. Lost on a
@@ -409,7 +463,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
     return {
       generationId,
       workflow: row?.model ?? "",
-      ...(p && typeof p === "object"
+      // a submission placeholder's params describe no generation
+      ...(p && typeof p === "object" && !p.submitting
         ? { inputs: p.inputs ?? {}, references: p.references ?? [], tokensCost: Number(p.tokensCost) || 0, note: p.note ?? "" }
         : fromJobLabel(row?.label)),
     };
@@ -483,24 +538,175 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
     });
   }
 
+  /** One paid execute request; an error whose outcome LoreMax leaves unknown is marked `ambiguous`. */
+  async function execute(init) {
+    try {
+      // a synchronous workflow renders inside this request (and uploads go first): give it room —
+      // aborting it would not stop LoreMax, so it is never cut short by the tool call's deadline
+      return await lmx.restJson("/api/v2/workflow/execute", init, { timeoutMs: 600_000 });
+    } catch (e) {
+      // a timeout, a dropped connection (fetch's TypeError) or a gateway 5xx without
+      // LoreMax's own JSON body (an edge 502/524 cutting a long sync render) leaves the
+      // outcome unknown: LoreMax may already have taken the tokens and be rendering
+      let body;
+      try {
+        body = JSON.parse(e?.body ?? "");
+      } catch {}
+      const unknown = e?.status != null
+        ? e.status >= 500 && (body == null || typeof body !== "object")
+        : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
+      if (!unknown) throw e;
+      throw Object.assign(
+        new Error(`loremax execute got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`),
+        { ambiguous: true },
+      );
+    }
+  }
+
+  /** The execute reply → the job, plus the outputs when it ran synchronously (null for an async one to poll). */
+  function accepted(call, sub, { workflow, inputs, references, note }) {
+    if (sub?.generationId == null) throw new Error(`loremax execute returned no generationId: ${JSON.stringify(sub).slice(0, 300)}`);
+    const generationId = String(sub.generationId);
+    const tokensCost = Number(sub.tokensCost) || 0;
+    ctx.log.info(`@${call.agent} loremax ${workflow} → generation ${generationId} (${tokensCost} tk)`);
+    // the workspace rides along: loremax_result answers only the one that started it
+    const job = { generationId, workspace: call.workspace, workflow, inputs, references, tokensCost, note };
+    // only an async reply has a job to poll: any other one ran synchronously and is finished
+    // (a failed run is a 500); its outputs are already in hand, so it is finished directly
+    // instead of spending a /check round trip on it
+    const result = sub.async === true
+      ? null
+      : { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], externalUrls: sub.externalUrls ?? [], contentTypes: [] };
+    return { job, result };
+  }
+
+  /**
+   * Tracked from the first second: a restart mid-wait loses neither the
+   * generation nor the tokens — the watcher finishes it and wakes the agent.
+   */
+  function trackGeneration(call, job) {
+    job.trackedId = ctx.jobs
+      ? ctx.jobs.track({
+        workspace: call.workspace,
+        agent: call.agent,
+        taskId: call.taskId ?? null,
+        sessionKey: call.sessionKey ?? null,
+        runId: call.runId ?? null,
+        externalId: job.generationId,
+        model: job.workflow,
+        label: jobLabel(job.note, job.tokensCost),
+        // kept with the job row on newer cores (older ones ignore it): a restart keeps the provenance
+        params: { inputs: job.inputs, references: job.references, tokensCost: job.tokensCost, note: job.note },
+      })
+      : null;
+    generations.set(job.generationId, job);
+  }
+
+  /**
+   * The placeholder row of a submission in progress: a restart while LoreMax
+   * renders a slow request leaves it running, and the next watcher tells the agent.
+   */
+  function trackSubmit(call, { mode, workflow, note }) {
+    const submitId = `submit:${crypto.randomUUID()}`;
+    const trackedId = ctx.jobs.track({
+      workspace: call.workspace,
+      agent: call.agent,
+      taskId: call.taskId ?? null,
+      sessionKey: call.sessionKey ?? null,
+      runId: call.runId ?? null,
+      externalId: submitId,
+      model: workflow,
+      label: note,
+      params: { submitting: true, mode, workflow, note },
+    });
+    inFlight.add(submitId);
+    return { submitId, trackedId, call, what: `LoreMax ${workflow}${note ? ` (${note})` : ""}`, task: call.taskId ? ` (task ${call.taskId})` : "" };
+  }
+
+  function settleSubmit(ph, status, { generationId, error } = {}) {
+    try {
+      ctx.jobs.settle(ph.trackedId, {
+        status,
+        result: { workspace: ph.call.workspace, ...(generationId != null ? { generationId: String(generationId) } : {}) },
+        ...(error ? { error: String(error).slice(0, 300) } : {}),
+      });
+    } finally {
+      inFlight.delete(ph.submitId);
+    }
+  }
+
+  const wakeSubmit = (ph, prompt) =>
+    ctx.wakeAgent({
+      workspace: ph.call.workspace,
+      agent: ph.call.agent,
+      key: `loremax-${ph.submitId}`,
+      ...(ph.call.sessionKey ? { sessionKey: ph.call.sessionKey } : {}),
+      prompt,
+    });
+
+  /** A synchronous result finished off the tool call (it came late, or too close to the deadline): save, bill, wake. */
+  async function finishLate(ph, job, result) {
+    const { generationId } = job;
+    // loremax_result answers "being saved" meanwhile, and nothing else saves it
+    inFlight.add(generationId);
+    generations.set(generationId, job);
+    try {
+      const done = await outputs.finish(ph.call, { ...job, trackedId: null }, { result });
+      settleSubmit(ph, "succeeded", { generationId });
+      wakeSubmit(ph, `${ph.what} — generation ${generationId} finished: ${savedList(done)} — check them, then continue where you left off${ph.task}.`);
+    } catch (e) {
+      settleSubmit(ph, "failed", { generationId, error: e?.message ?? e });
+      wakeSubmit(ph, `${ph.what} — generation ${generationId} finished, but saving its outputs failed: ${e?.message ?? e}${ph.task}.`);
+    } finally {
+      inFlight.delete(generationId);
+      generations.delete(generationId);
+    }
+  }
+
+  /** The submission answered after the tool call had replied `submitting`. */
+  async function settleLate(ph, { sub, error }, base) {
+    let got;
+    try {
+      if (error) throw error;
+      got = accepted(ph.call, sub, base);
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      settleSubmit(ph, "failed", { error: msg });
+      wakeSubmit(ph, e?.ambiguous
+        ? `${ph.what}: ${msg}${ph.task}.`
+        : `${ph.what} FAILED: ${msg}. Decide whether to retry (other inputs or workflow) or report the blocker${ph.task}.`);
+      return;
+    }
+    if (got.result) return finishLate(ph, got.job, got.result);
+    // async: the real job row takes over before the placeholder goes; the watcher wakes the agent
+    trackGeneration(ph.call, got.job);
+    settleSubmit(ph, "succeeded", { generationId: got.job.generationId });
+  }
+
   ctx.registerTool({
     name: "loremax_generate",
     description:
-      "Run a LoreMax workflow (image or video) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. If the wait runs out you get a generation_id back and are WOKEN when it lands (or poll loremax_result).",
+      `Run a LoreMax workflow (image or video) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands (or poll loremax_result with the generation_id). Never call it again for a submitting reply.`,
     schema: {
       workflow_id: z.string().describe("numeric id or visual id from loremax_workflows"),
       inputs: z.record(z.string(), z.unknown()).describe("workflow inputs, exactly as loremax_workflows names the input fields"),
       references: z.array(z.string()).max(MAX_REFS).optional().describe("artifacts/<path> or workspace files sent as reference images/videos"),
-      wait_s: z.number().int().min(10).max(1500).optional().describe("seconds to wait before handing back the generation_id (default from config, 180)"),
+      wait_s: z.number().int().min(10).max(MAX_WAIT_S).optional().describe(`seconds to wait before handing back (10..${MAX_WAIT_S}; default from config, ${DEFAULT_WAIT_S})`),
       note: z.string().max(200).optional().describe("short provenance note stored on the outputs (what this is for)"),
     },
     handler: async (args, call) => {
+      // the budget covers the whole call from here: submission, polling and saving
+      const start = now();
+      const waitS = waitSeconds(args.wait_s, 10, lmx.defaultWaitS());
+      const until = start + waitS * 1000;
+      const deadline = start + MAX_WAIT_S * 1000;
       const workflow = String(args.workflow_id ?? "").trim();
       if (!workflow) throw new Error("workflow_id is required — pick one from loremax_workflows");
       const inputs = args.inputs ?? {};
       const references = (args.references ?? []).map(String);
       const files = loadReferences(call.workspace, references);
       const note = String(args.note ?? (typeof inputs.prompt === "string" ? inputs.prompt.slice(0, 120) : ""));
+      const base = { workflow, inputs, references, note };
 
       let init;
       if (files.length) {
@@ -517,74 +723,82 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       } else {
         init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workflowId: workflow, inputs }) };
       }
-      let sub;
-      try {
-        // a synchronous workflow renders inside this request (and uploads go first): give it room
-        sub = await lmx.restJson("/api/v2/workflow/execute", init, 600_000);
-      } catch (e) {
-        // a timeout, a dropped connection (fetch's TypeError) or a gateway 5xx without
-        // LoreMax's own JSON body (an edge 502/524 cutting a long sync render) leaves the
-        // outcome unknown: LoreMax may already have taken the tokens and be rendering
-        let body;
-        try {
-          body = JSON.parse(e?.body ?? "");
-        } catch {}
-        const unknown = e?.status != null
-          ? e.status >= 500 && (body == null || typeof body !== "object")
-          : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
-        if (!unknown) throw e;
-        throw new Error(`loremax execute got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`);
-      }
-      if (sub?.generationId == null) throw new Error(`loremax execute returned no generationId: ${JSON.stringify(sub).slice(0, 300)}`);
-      const generationId = String(sub.generationId);
-      const tokensCost = Number(sub.tokensCost) || 0;
-      ctx.log.info(`@${call.agent} loremax ${workflow} → generation ${generationId} (${tokensCost} tk)`);
-      // the workspace rides along: loremax_result answers only the one that started it
-      const job = { generationId, workspace: call.workspace, workflow, inputs, references, tokensCost, note };
-      // only an async reply has a job to poll: any other one ran synchronously and is finished
-      // (a failed run is a 500), its outputs are in the reply and /check would answer 400
-      if (sub.async !== true) {
-        const result = { originalUrls: sub.originalUrls ?? [], previewUrls: sub.previewUrls ?? [], externalUrls: sub.externalUrls ?? [], contentTypes: [] };
-        return text(JSON.stringify(await outputs.finish(call, { ...job, trackedId: null }, { result }), null, 1));
-      }
-      // tracked from the first second: a restart mid-wait loses neither the
-      // generation nor the tokens — the watcher finishes it and wakes the agent
-      const trackedId = ctx.jobs
-        ? ctx.jobs.track({
-          workspace: call.workspace,
-          agent: call.agent,
-          taskId: call.taskId ?? null,
-          sessionKey: call.sessionKey ?? null,
-          runId: call.runId ?? null,
-          externalId: generationId,
-          model: workflow,
-          label: jobLabel(note, tokensCost),
-          // kept with the job row on newer cores (older ones ignore it): a restart keeps the provenance
-          params: { inputs, references, tokensCost, note },
-        })
-        : null;
-      job.trackedId = trackedId;
-      generations.set(generationId, job);
 
-      return text(JSON.stringify(await waitFor(call, job, (args.wait_s ?? lmx.defaultWaitS()) * 1000), null, 1));
+      // detached only where a late answer still reaches the agent (a job row that
+      // survives a restart, and a wake); older cores block on the submission as before
+      const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "rest", workflow, note }) : null;
+      const submission = execute(init).then((sub) => ({ sub }), (error) => ({ error }));
+      let first;
+      if (ph) {
+        const timer = new AbortController();
+        first = await Promise.race([submission, sleep(Math.max(0, until - now()), timer.signal).then(() => null)]);
+        timer.abort();
+      } else {
+        first = await submission;
+      }
+      if (!first) {
+        submission.then((o) => settleLate(ph, o, base)).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+        return text(JSON.stringify({
+          status: "submitting",
+          workflow,
+          hint: "submitted, still waiting for LoreMax — do NOT call loremax_generate again; end your turn, you will be WOKEN with the result",
+        }, null, 1));
+      }
+
+      let got;
+      try {
+        if (first.error) throw first.error;
+        got = accepted(call, first.sub, base);
+      } catch (e) {
+        if (ph) settleSubmit(ph, "failed", { error: e?.message ?? e });
+        throw e;
+      }
+      const { job, result } = got;
+      if (result) {
+        // too close to the deadline for downloads: saved in the background, the agent is woken
+        if (ph && deadline - now() < FINISH_RESERVE_MS) {
+          finishLate(ph, job, result).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));
+          return text(JSON.stringify({
+            generation_id: job.generationId,
+            status: "in_progress",
+            tokens_cost: job.tokensCost,
+            hint: "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files",
+          }, null, 1));
+        }
+        try {
+          const done = await outputs.finish(call, { ...job, trackedId: null }, { result });
+          if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
+          return text(JSON.stringify(done, null, 1));
+        } catch (e) {
+          if (ph) settleSubmit(ph, "failed", { generationId: job.generationId, error: e?.message ?? e });
+          throw e;
+        }
+      }
+      trackGeneration(call, job);
+      if (ph) settleSubmit(ph, "succeeded", { generationId: job.generationId });
+      return text(JSON.stringify(await waitFor(call, job, { until, deadline, waitS }), null, 1));
     },
   });
 
   ctx.registerTool({
     name: "loremax_result",
     description:
-      "Status / result of a LoreMax generation (a generation_id from loremax_generate that ran out of wait time). Completed outputs are saved into artifacts exactly like loremax_generate does; an already finished one returns its saved paths. Free.",
+      `Status / result of a LoreMax generation (a generation_id from loremax_generate that ran out of wait time). Completed outputs are saved into artifacts exactly like loremax_generate does; an already finished one returns its saved paths. Free. wait_s keeps polling up to ${MAX_WAIT_S}s.`,
     schema: {
       generation_id: z.string().describe("generation_id from loremax_generate"),
-      wait_s: z.number().int().min(0).max(1500).optional().describe("keep polling this long (default 0: one check)"),
+      wait_s: z.number().int().min(0).max(MAX_WAIT_S).optional().describe(`keep polling this long (0..${MAX_WAIT_S}; default 0: one check)`),
     },
     handler: async (args, call) => {
+      const start = now();
+      const waitS = waitSeconds(args.wait_s, 0, 0);
       const generationId = String(args.generation_id ?? "").trim();
       if (!generationId) throw new Error("generation_id is required — loremax_generate hands it back");
       // job rows are per plugin, not per workspace, and LoreMax ids are sequential:
       // only this workspace's generations are reachable from here — an id nothing
       // here owns (unknown, or lost with a restart on a core without jobs) is refused
       const notYours = `generation ${generationId} was not started from this workspace — use the generation_id loremax_generate handed back`;
+      // a submission placeholder is no generation: its outcome comes as a wake
+      if (isSubmitRow(generationId)) throw new Error(notYours);
       const found = ctx.jobs?.find?.(generationId) ?? null;
       const row = ctx.jobs?.pending().find((j) => j.externalId === generationId);
       // settled rows carry the workspace in their result (the host's find() has no workspace column)
@@ -610,26 +824,38 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
       // after a restart only the job row is left: its workflow, params (or label) and task
       // (the pending row's id when the core has no find(): the job must still settle, or the watcher saves it again)
       const job = generations.get(generationId) ?? { ...fromRow(generationId, row, found), trackedId: found?.id ?? row?.id ?? null };
-      return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, Number(args.wait_s ?? 0) * 1000), null, 1));
+      const budget = { until: start + waitS * 1000, deadline: start + MAX_WAIT_S * 1000, waitS };
+      return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, budget), null, 1));
     },
   });
 
 
-  /** Poll /check until completed (→ finish), failed (→ settle + throw) or waitMs runs out (→ in_progress reply). */
-  async function waitFor(call, job, waitMs) {
+  /**
+   * Poll /check until completed (→ finish), failed (→ settle + throw) or `until`
+   * passes (→ in_progress reply). `deadline` ends every request and Retry-After
+   * wait; a result that lands too close to it is left to the watcher to save.
+   */
+  async function waitFor(call, job, { until, deadline, waitS }) {
     const { generationId, trackedId } = job;
+    let landed = false;
     inFlight.add(generationId);
     try {
-      const started = now();
       for (;;) {
         let c;
         try {
-          c = await lmx.check(generationId);
+          c = await lmx.check(generationId, { deadline });
         } catch (e) {
+          // out of time (a request cut short, a Retry-After that does not fit): hand back, not a failure
+          if (e?.deadline) break;
           // the generation goes on (and is tracked): don't present a status hiccup as a lost render
           throw new Error(`LoreMax generation ${generationId} status check failed: ${e?.message ?? e} — it may still finish; poll loremax_result with this generation_id`);
         }
         if (c?.status === "completed") {
+          // downloads take time and the client gives up at 60 s: the watcher (or the next loremax_result) saves it
+          if (deadline - now() < FINISH_RESERVE_MS) {
+            landed = true;
+            break;
+          }
           const done = await outputs.finish(call, job, c);
           generations.delete(generationId);
           return done;
@@ -641,13 +867,22 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
             ctx.jobs.settle(trackedId, { status: "failed", result: { workspace: call.workspace }, error: `${error}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300) });
           throw new Error(`LoreMax generation ${generationId} failed: ${error}`);
         }
-        if (now() - started >= waitMs) break;
+        if (now() >= until) break;
         await sleep(pollMs);
       }
     } finally {
       inFlight.delete(generationId);
     }
-    const waited = Math.round(waitMs / 1000);
+    if (landed)
+      return {
+        generation_id: String(generationId),
+        status: "in_progress",
+        tokens_cost: Number(job.tokensCost) || 0,
+        hint: ctx.jobs
+          ? "LoreMax finished it; the outputs are being saved — end your turn if nothing else is pending: you will be WOKEN with the files (or poll loremax_result)"
+          : "LoreMax finished it — call loremax_result with this generation_id to save the outputs",
+      };
+    const waited = Math.round(waitS);
     return {
       generation_id: String(generationId),
       status: "in_progress",
@@ -680,6 +915,13 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
         const what = `LoreMax generation ${j.externalId} (${j.model || "workflow"}${j.label ? ` — ${j.label}` : ""})`;
         const task = j.taskId ? ` (task ${j.taskId})` : "";
         try {
+          // a placeholder no running submission holds was left by a process that died
+          // mid-submission: nothing to /check, LoreMax may or may not have charged it
+          if (isSubmitRow(j.externalId)) {
+            ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error: "the submission was interrupted by a restart" });
+            wake(`LoreMax ${j.model || "workflow"}${j.label ? ` (${j.label})` : ""}: the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again${task}.`);
+            continue;
+          }
           const expired = now() - Date.parse(j.createdAt) > GIVE_UP_MS;
           // ask LoreMax even past 6h: a job that finished while Bridex was down is
           // paid for and must still be saved — only a still-pending (or unreachable) one is given up
@@ -695,13 +937,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now }
             const call = { workspace: j.workspace, agent: j.agent, runId: null, sessionKey: j.sessionKey, taskId: j.taskId };
             const done = await outputs.finish(call, job, c);
             generations.delete(j.externalId);
-            const saved = done.artifacts.map((a) => `artifacts/${a}`).join(", ");
-            // outputs that could not be downloaded are still paid for and on the CDN: hand the agent their URLs
-            const onCdn = done.left_on_cdn?.length
-              ? `not downloaded (failed or over the size cap), still on LoreMax's CDN: ${done.left_on_cdn.join(", ")}`
-              : "";
-            const list = [saved, onCdn].filter(Boolean).join("; ") || "(LoreMax returned no files)";
-            wake(`${what} finished: ${list} — check them, then continue where you left off${task}.`);
+            wake(`${what} finished: ${savedList(done)} — check them, then continue where you left off${task}.`);
           } else if (c?.status === "failed") {
             generations.delete(j.externalId);
             const error = `${c.error ?? "unknown error"}${c.errorType ? ` (${c.errorType})` : ""}`.slice(0, 300);

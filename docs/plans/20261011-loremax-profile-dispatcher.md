@@ -179,21 +179,21 @@
 ## Implementation Steps
 
 ### Task 1: Keep every tool call under the client timeout (deadline-aware budget, detached submission)
-- [ ] change `default_wait_s` to 45:
+- [x] change `default_wait_s` to 45:
   - `cfg` default (`index.mjs:68-74`);
   - `defaultWaitS`: fallback 45 and clamp to 10..50 (`index.mjs:93-96`);
   - header sample (`index.mjs:12-18`);
   - `plugin.yaml` (`default: 45`, `maximum: 50`);
   - clamp `args.wait_s` in code, not only in zod: 10..50 for `loremax_generate`, 0..50 for `loremax_result`;
   - update both tool descriptions.
-- [ ] add test seams to `activate(ctx, {pollMs, now, sleep})`: `sleep` (default real timer) drives the poll sleeps, the budget race and Retry-After waits, so tests advance a fake clock instead of sleeping
-- [ ] compute `deadline = start + budgetMs` per tool call and thread it through `waitFor`, `check`, `restJson` and the later `rpc`:
+- [x] add test seams to `activate(ctx, {pollMs, now, sleep})`: `sleep` (default real timer) drives the poll sleeps, the budget race and Retry-After waits, so tests advance a fake clock instead of sleeping
+- [x] compute `deadline = start + budgetMs` per tool call and thread it through `waitFor`, `check`, `restJson` and the later `rpc`:
   - every non-submission fetch timeout becomes `min(own, deadline - now())`;
   - a Retry-After that does not fit before the deadline is not slept: return `in_progress`;
   - when `waitFor` sees `completed` with less than ~10 s left, do not call `finish` inline: return `in_progress` without settling, so the watcher saves the files and wakes the agent.
 
   The paid submission request keeps its own long timeout (600 s): aborting it would not stop LoreMax.
-- [ ] run the submission as a detached unit and race it against the deadline:
+- [x] run the submission as a detached unit and race it against the deadline:
   - before starting it, when `ctx.jobs && ctx.wakeAgent`:
     - `ctx.jobs.track` a placeholder: `externalId: 'submit:<uuid>'`, the usual label and model, and `params: {submitting: true, mode, workflow/tool, note}`;
     - add the placeholder to `inFlight`.
@@ -204,10 +204,10 @@
     - **definite failure**: wake the agent with the error;
     - **ambiguous failure**: wake with the existing "may have been charged" text.
   - in every case settle the placeholder (`succeeded` with `{workspace, generationId}`, or `failed`) and remove it from `inFlight`.
-- [ ] watcher (`watchOnce`): a `submit:` row that is not in `inFlight` was left by a dead process. Settle it `failed` and wake the agent once with "the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again". Never call `check` for `submit:` rows. `loremax_result` and `fromRow` ignore them.
-- [ ] on cores without `ctx.jobs` or `ctx.wakeAgent` do not detach: keep the 0.1.0 blocking submission (the polling budget still applies)
-- [ ] fix the stale comment at `index.mjs:546` («/check would answer 400»): a sync reply is finished directly because its outputs are already in hand, not because the REST check would fail
-- [ ] write tests in `test/generate.test.mjs` / `test/result-watcher.test.mjs`:
+- [x] watcher (`watchOnce`): a `submit:` row that is not in `inFlight` was left by a dead process. Settle it `failed` and wake the agent once with "the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again". Never call `check` for `submit:` rows. `loremax_result` and `fromRow` ignore them.
+- [x] on cores without `ctx.jobs` or `ctx.wakeAgent` do not detach: keep the 0.1.0 blocking submission (the polling budget still applies)
+- [x] fix the stale comment at `index.mjs:546` («/check would answer 400»): a sync reply is finished directly because its outputs are already in hand, not because the REST check would fail
+- [x] write tests in `test/generate.test.mjs` / `test/result-watcher.test.mjs`:
   - defaults and clamping;
   - slow sync execute: returns `submitting`, later `finish` and wake with files, and no `/check` call;
   - slow async execute: returns `submitting`, later tracked, then finished and woken by the watcher;
@@ -218,7 +218,7 @@
   - a Retry-After of 30 near the deadline is not slept;
   - older core without `wakeAgent` blocks as in 0.1.0;
   - update `test/acceptance.test.mjs:108-109` and `test/generate.test.mjs:281-290`.
-- [ ] run `npm test` - must pass before task 2
+- [x] run `npm test` - must pass before task 2
 
 ### Task 2: Idempotent spend, 429 retry for MCP calls, more output types and Text workflows
 - [ ] pass `ref: String(job.generationId)` to `ctx.usage.record` in `finish` (`index.mjs:368-377`) so a repeated finish after a crash is counted once on the studio host
@@ -409,9 +409,13 @@
 - **Job params (profile)**: `{mode: 'profile', tool, arguments, references, tokensCost, note, identity: {workflowId,
   visualId, title, category, contentType, pipeline}}`. Placeholder: `externalId: 'submit:<uuid>'`,
   `params: {submitting: true, mode, workflow|tool, note}`.
-- **Budget**: `budgetMs = clamp(wait_s ?? default_wait_s, 10, 50) * 1000`, `deadline = start + budgetMs`.
-  Non-submission fetches and sleeps never extend past the deadline. The submission request keeps its own 600 s
-  timeout inside the detached unit. Inline `finish` happens only with ≥ ~10 s left.
+- **Budget**: `budgetMs = clamp(wait_s ?? default_wait_s, 10, 50) * 1000` (0..50 for `loremax_result`).
+  Two horizons per call (Task 1 implementation): `until = start + budgetMs` ends polling and the submission race;
+  `deadline = start + 50 s` (the hard cap) bounds every non-submission fetch timeout and Retry-After sleep and the
+  finish reserve. One horizon would leave `loremax_result` with `wait_s: 0` no room for its single check. It would
+  also stop a short `wait_s` from ever finishing inline. Non-submission fetches and sleeps never extend past
+  `deadline`. The submission request keeps its own 600 s timeout inside the detached unit. Inline `finish` happens
+  only with ≥ ~10 s left before `deadline`; a sync reply that lands later is saved in the background and woken.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

@@ -122,3 +122,51 @@ export function withEnv(vars) {
     }
   };
 }
+
+/**
+ * The plugin's sleep seam on a fake clock. A plain sleep advances the clock and
+ * resolves on the next turn. The budget race passes an abort signal: it waits
+ * until the test calls expire() (the clock jumps by its length) or the plugin
+ * aborts it because the submission answered first.
+ */
+export function fakeSleep(clock) {
+  const races = [];
+  const slept = [];
+  const sleep = (ms, signal) => {
+    if (!signal) {
+      slept.push(ms);
+      clock.t += ms;
+      return new Promise((r) => setImmediate(r));
+    }
+    return new Promise((resolve) => {
+      if (signal.aborted) return resolve();
+      const entry = () => {
+        if (!signal.aborted) clock.t += ms;
+        resolve();
+      };
+      races.push(entry);
+      signal.addEventListener("abort", () => {
+        races.splice(races.indexOf(entry) >>> 0, 1);
+        resolve();
+      }, { once: true });
+    });
+  };
+  /** The budget runs out: waits until a race is armed, then ends every racing sleep. */
+  const expire = async () => {
+    await eventually(() => races.length > 0);
+    races.splice(0).forEach((f) => f());
+  };
+  return { sleep, expire, slept, races };
+}
+
+/** Resolves once fn() is truthy (polled every turn, up to ~2 s). */
+export async function eventually(fn, what = "condition") {
+  for (let i = 0; i < 400; i++) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/** Job rows that stand for generations, not submission placeholders. */
+export const generationRows = (jobs) => jobs.filter((j) => !String(j.externalId).startsWith("submit:"));

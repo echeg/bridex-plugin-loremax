@@ -32,10 +32,10 @@ config_schema:
     default_wait_s:
       type: integer
       title: Wait before handing back, s
-      default: 180
+      default: 45
       minimum: 10
-      maximum: 1500
-      description: How long loremax_generate waits for a result before returning a generation_id
+      maximum: 50
+      description: How long loremax_generate waits for a result before handing back (10..50 s: agents' MCP client gives up at 60 s)
     usd_per_token:
       type: number
       title: USD per token

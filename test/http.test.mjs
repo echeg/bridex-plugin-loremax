@@ -123,3 +123,39 @@ test("mcpCall: HTTP 401 surfaces the status", async () => {
   assert.match(err.message, /loremax 401 \/api\/mcp get_balance: Unauthorized/);
   assert.equal(err.status, 401);
 });
+
+test("restJson with a deadline: past it nothing is sent; a Retry-After that does not fit is not slept", async () => {
+  const clock = { t: 1_000 };
+  const slept = [];
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  const c = createClient(ctx, { now: () => clock.t, sleep: async (ms) => slept.push(ms) });
+  const f = mockFetch([["GET", "/api/v1/workflows", () => jsonResponse({ error: "slow down" }, 429, { "retry-after": "30" })]]);
+  restore = f.restore;
+  const late = await c.restJson("/api/v1/workflows", {}, { deadline: 1_000 }).catch((e) => e);
+  assert.equal(late.deadline, true);
+  assert.equal(f.calls.length, 0);
+  const tight = await c.restJson("/api/v1/workflows", {}, { deadline: 20_000 }).catch((e) => e);
+  assert.equal(tight.deadline, true);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(slept, []);
+  // with room left the wait goes through the sleep seam
+  await assert.rejects(c.restJson("/api/v1/workflows", {}, { deadline: 60_000 }), /loremax 429/);
+  assert.deepEqual(slept, [30_000]);
+});
+
+test("restJson: a request cut short by the deadline is a deadline error, not a transport failure", async () => {
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  const c = createClient(ctx);
+  const f = mockFetch([["GET", "/api/v1/workflows", (req) => new Promise(() => {})]]);
+  restore = f.restore;
+  // the mock ignores the signal: hand fetch a version that honors it
+  const mocked = globalThis.fetch;
+  globalThis.fetch = (url, init) => Promise.race([mocked(url, init), new Promise((_, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason)))]);
+  try {
+    const err = await c.restJson("/api/v1/workflows", {}, { deadline: Date.now() + 30 }).catch((e) => e);
+    assert.equal(err.deadline, true);
+    assert.match(err.message, /out of time/);
+  } finally {
+    globalThis.fetch = mocked;
+  }
+});

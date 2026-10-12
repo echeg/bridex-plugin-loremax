@@ -2,7 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import activate, { createClient } from "../index.mjs";
-import { fakeCtx, mockFetch } from "./helpers.mjs";
+import { fakeCtx, mockFetch, generationRows } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const CDN = "https://cdn.lm.test";
@@ -16,7 +16,7 @@ const setup = async () => {
   const f = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
   const seam = await activate(f.ctx, { pollMs: 1, now: () => 0 });
   const run = async (args) => JSON.parse((await f.rec.tools.get("loremax_generate").handler(args, CALL)).content[0].text);
-  return { ...f, run, watchOnce: seam.watchOnce };
+  return { ...f, run, gens: () => generationRows(f.jobs), watchOnce: seam.watchOnce };
 };
 
 let restore = () => {};
@@ -42,8 +42,8 @@ test("empty originalUrls and previewUrls: the reply says no files, the job settl
   assert.equal(reply.status, "completed");
   assert.deepEqual(reply.artifacts, []);
   assert.match(reply.hint, /no files/);
-  assert.equal(s.jobs[0].status, "succeeded");
-  assert.deepEqual(s.jobs[0].result, { workspace: "studio", artifacts: [], tokensCost: 7 });
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.deepEqual(s.gens()[0].result, { workspace: "studio", artifacts: [], tokensCost: 7 });
   assert.equal(s.rec.mirror.length, 0);
   assert.equal(s.rec.annotate.length, 0);
   // the tokens were spent all the same
@@ -56,8 +56,8 @@ test("empty outputs through the watcher: settled succeeded and the wake prompt s
   const f = mockFetch([["POST", "/api/v2/generations/501/check", () => EMPTY]]);
   restore = f.restore;
   await s.watchOnce();
-  assert.equal(s.jobs[0].status, "succeeded");
-  assert.deepEqual(s.jobs[0].result.artifacts, []);
+  assert.equal(s.gens()[0].status, "succeeded");
+  assert.deepEqual(s.gens()[0].result.artifacts, []);
   assert.match(s.rec.wakes[0].prompt, /LoreMax returned no files/);
 });
 
@@ -73,7 +73,7 @@ test("workflow_id: a numeric id and a visual id are both sent as given and name 
     const reply = await s.run({ workflow_id: id, inputs: { prompt: "p" } });
     assert.equal(f.calls[0].json.workflowId, id);
     assert.deepEqual(reply.artifacts, [file]);
-    assert.equal(s.jobs[0].model, id);
+    assert.equal(s.gens()[0].model, id);
     assert.equal(s.rec.annotate[0].meta.generation.workflow, id);
     restore();
   }
@@ -88,11 +88,11 @@ test("inputs without prompt: the job label and provenance note come from note; n
   ]);
   restore = f.restore;
   await s.run({ workflow_id: "upscale", inputs: { scale: 2 }, note: "hero upscale" });
-  assert.equal(s.jobs[0].label, "hero upscale · 7 tk");
+  assert.equal(s.gens()[0].label, "hero upscale · 7 tk");
   assert.match(s.rec.annotate[0].meta.description, /· hero upscale$/);
 
   await s.run({ workflow_id: "upscale", inputs: { scale: 2, prompt: 42 } });
-  assert.equal(s.jobs[1].label, "7 tk");
+  assert.equal(s.gens()[1].label, "7 tk");
 });
 
 test("plugin.yaml: every config_schema property has a default in createClient", () => {
@@ -104,7 +104,8 @@ test("plugin.yaml: every config_schema property has a default in createClient", 
   for (const k of keys) assert.notEqual(cfg[k], undefined, `${k} has no default`);
   assert.match(yaml, /^name: loremax$/m);
   assert.match(yaml, /^entry: index\.mjs$/m);
-  // the manifest default and the code default agree
-  assert.match(yaml, /default_wait_s:[\s\S]*?default: 180/);
-  assert.equal(cfg.default_wait_s, 180);
+  // the manifest default and the code default agree, and stay under the agents' 60 s MCP client timeout
+  assert.match(yaml, /default_wait_s:[\s\S]*?default: 45/);
+  assert.match(yaml, /default_wait_s:[\s\S]*?maximum: 50/);
+  assert.equal(cfg.default_wait_s, 45);
 });
