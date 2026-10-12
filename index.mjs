@@ -115,8 +115,9 @@ function httpError(message, status, body) {
 
 /**
  * A paid request that ended without LoreMax's answer — a timeout, a dropped
- * connection (fetch's TypeError) or a gateway 5xx without LoreMax's own JSON body
- * (an edge 502/524 cutting a long sync render) — leaves the outcome unknown:
+ * connection (fetch's TypeError), a gateway 5xx without LoreMax's own JSON body
+ * (an edge 502/524 cutting a long sync render) or a 2xx whose body is unreadable
+ * (LoreMax answered, so it most likely ran) — leaves the outcome unknown:
  * LoreMax may already have taken the tokens and be rendering. → the
  * may-have-been-charged error (`ambiguous`), or `e` itself for a definite outcome.
  */
@@ -126,7 +127,7 @@ function unanswered(e, what) {
     body = JSON.parse(e?.body ?? "");
   } catch {}
   const unknown = e?.status != null
-    ? e.status >= 500 && (body == null || typeof body !== "object")
+    ? (e.status >= 200 && e.status < 300) || (e.status >= 500 && (body == null || typeof body !== "object"))
     : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
   if (!unknown) return e;
   return Object.assign(
@@ -738,17 +739,21 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
   }
 
   /**
-   * A synchronous reply with neither URLs nor text (a Text workflow on the v2
-   * execute reply): one REST /check for what it made, and only when that body has
-   * no result at all, one MCP check_generation. Both are quick reads, kept short:
-   * this can run inside a tool call. Never throws: the spend is still recorded.
+   * A completed generation with neither URLs nor text (a Text workflow on the v2
+   * execute reply, or on a LoreMax whose REST /check lacks textContent): for a
+   * synchronous reply one REST /check for what it made, and only when that body has
+   * no result at all (or the result already came from /check), one MCP
+   * check_generation. Both are quick reads, kept short: this can run inside a
+   * tool call. Never throws: the spend is still recorded.
    */
-  async function lookupOutputs(generationId) {
-    try {
-      const c = await lmx.check(generationId, { timeoutMs: LOOKUP_TIMEOUT_MS });
-      if (c?.result) return c.result;
-    } catch (e) {
-      ctx.log.warn(`loremax check ${generationId} for its outputs: ${e?.message ?? e}`);
+  async function lookupOutputs(generationId, { checked = false } = {}) {
+    if (!checked) {
+      try {
+        const c = await lmx.check(generationId, { timeoutMs: LOOKUP_TIMEOUT_MS });
+        if (c?.result) return c.result;
+      } catch (e) {
+        ctx.log.warn(`loremax check ${generationId} for its outputs: ${e?.message ?? e}`);
+      }
     }
     try {
       const g = await lmx.mcpCall("check_generation", { generationId: String(generationId) }, { timeoutMs: LOOKUP_TIMEOUT_MS });
@@ -779,7 +784,7 @@ export function createOutputs(ctx, lmx, { downloadCap = DOWNLOAD_CAP } = {}) {
       ...(costUsd ? { costUsd } : {}),
     };
     let result = check?.result ?? {};
-    if (check?.fromReply && !urlsOf(result).length && !textOf(result)) result = (await lookupOutputs(job.generationId)) ?? result;
+    if (!urlsOf(result).length && !textOf(result)) result = (await lookupOutputs(job.generationId, { checked: !check?.fromReply })) ?? result;
     const { artifacts, skipped, textError } = await saveOutputs(call, slugOf(workflow), job.generationId, result, job.note ?? "", generation);
     ctx.usage.record({
       workspace: call.workspace,

@@ -329,6 +329,29 @@ test("a sync reply with really nothing to save: one /check, one check_generation
   assert.equal(s.rec.usage.length, 1);
 });
 
+test("Text workflow: a polled /check that completes without textContent (an older LoreMax) reads the text from one check_generation", async () => {
+  const s = await setup();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => EXECUTE],
+    checkRoute(s, [{ status: "pending" }, { status: "completed", result: { originalUrls: [], previewUrls: [], externalUrls: [], contentTypes: [] } }]),
+    ["POST", "/api/mcp", (req) => mcpResult({ generationId: 501, status: "completed", content_type: "text", text_content: "Polled words." }, req.json.id)],
+  ]);
+  restore = f.restore;
+  const r = await s.run({ workflow_id: "story", inputs: { prompt: "p" } });
+  assert.deepEqual(r.artifacts, ["task-9/story-501.md"]);
+  assert.equal(fs.readFileSync(path.join(s.art, "task-9/story-501.md"), "utf8"), "Polled words.");
+  // the polled body already was the /check: no second one
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/check")).length, 2);
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/api/mcp")).length, 1);
+  assert.equal(s.rec.usage.length, 1);
+});
+
+test("execute answered 200 with an unreadable body: says the generation may have been charged", async () => {
+  restore = mockFetch([["POST", "/api/v2/workflow/execute", () => new Response("<html>ok</html>", { status: 200 })]]).restore;
+  const s = await setup();
+  await assert.rejects(s.run({ workflow_id: "w", inputs: {} }), (e) => e.ambiguous === true && /non-JSON.*may have accepted and charged/.test(e.message));
+});
+
 test("execute with no reply (timeout / reset): says the generation may have been charged", async () => {
   const f = mockFetch([["POST", "/api/v2/workflow/execute", () => { throw new TypeError("fetch failed"); }]]);
   restore = f.restore;
@@ -1172,6 +1195,14 @@ test("profile: late outcomes after submitting — a lost reply, a failed run, an
 test("profile: a JSON-RPC error on the paid call says it may have been charged", async () => {
   const s = await profileSetup({ gen: () => ({ rpcError: { code: -32603, message: "Internal error" } }) });
   await assert.rejects(s.run({ tool: "write_text", arguments: { text: "hi" } }), (e) => e.ambiguous === true && /Internal error.*may have accepted and charged/.test(e.message));
+  assert.equal(s.rec.usage.length, 0);
+});
+
+test("profile: a 200 with an unreadable body on the paid call says it may have been charged", async () => {
+  let paid = false;
+  const s = await profileSetup({ onPost: (req) => (!Array.isArray(req.json) && req.json.method === "tools/call" && !UPLOAD_TOOLS.has(req.json.params.name) && (paid = true) ? new Response("event: message\ndata: {}", { status: 200 }) : null) });
+  await assert.rejects(s.run({ tool: "write_text", arguments: { text: "hi" } }), (e) => e.ambiguous === true && /non-JSON[\s\S]*may have accepted and charged/.test(e.message));
+  assert.equal(paid, true);
   assert.equal(s.rec.usage.length, 0);
 });
 
