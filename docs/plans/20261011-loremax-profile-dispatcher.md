@@ -20,8 +20,10 @@
   Builder, Prompt Editor V2, 3D Camera).
 
 ## Decisions
-- **Context**: LoreMax keeps the typed MCP profiles implementation and hardens it in
-  `fluxgenenerator/docs/plans/20261011-mcp-profiles-hardening.md`. Stage 1 targets the hardened contract.
+- **Context**: LoreMax ships typed MCP profiles; the hardening plan
+  (`fluxgenenerator/docs/plans/completed/20261011-mcp-profiles-hardening.md`) is merged into LoreMax `main`
+  (2026-10-12, pushed) and its contract is documented in `fluxgenenerator/docs/mcp-workflow-profiles.md`. Stage 1
+  targets that contract as it stands; the facts below were re-verified against it on 2026-10-12.
 - **Chosen approach — dispatcher**:
   - keep three Bridex tools;
   - read the profile's `tools/list` as data and give its JSON Schema to the agent as text;
@@ -62,13 +64,20 @@
   `schema_revision` and its name is not a known service tool; `_meta['loremax.ai/workflow']` is used for identity
   when present, never for classification.
 - **Verified facts**:
-  - Stateless `tools/call` without `initialize` works on `/api/mcp` and on profile URLs; the hardening plan
-    makes it contract.
+  - Stateless `tools/call` without `initialize` is contract on `/api/mcp` and on profile URLs
+    (`docs/mcp-workflow-profiles.md` «Connection and discovery»); `tools.listChanged` is `false`, so the catalog
+    is refreshed on connect and after the error codes below.
   - Profile tool errors are JSON text `{error, errorCode?, details?}` with `isError: true`. Codes:
     `SCHEMA_REVISION_MISMATCH`, `INVALID_WORKFLOW_INPUT`, `MEDIA_INPUT_INVALID`, `WORKFLOW_UNAVAILABLE`,
-    `PROFILE_ORGANIZATION_MISMATCH`, `INSUFFICIENT_TOKENS`, `GENERATION_FAILED`, `GENERATION_NOT_FOUND`. The
-    hardening plan adds the last three. With it, every profile failure after the pending row is
-    `GENERATION_FAILED` with `details.generationId`.
+    `PROFILE_ORGANIZATION_MISMATCH`, `INSUFFICIENT_TOKENS`, `GENERATION_FAILED`, `GENERATION_NOT_FOUND`. Every
+    profile failure after the pending row is `GENERATION_FAILED` with `details.generationId`; `details` is a
+    closed whitelist (`issues` ≤ 20, `generationId`, `requiredTokens`) and may be absent. A never-bound tool name
+    is JSON-RPC `-32601`; a bound but unpublished one is `WORKFLOW_UNAVAILABLE`.
+  - A generation tool's inline reply is `{generationId, status: 'completed', tokensCost, async: false, …outputs}`
+    on synchronous success (`result_url`, `previewUrls`, `originalUrls`, `externalUrls`, `content_type`,
+    `text_content`/`textContent`), or `{generationId, status: 'pending', tokensCost, async: true, jobId?}`
+    (`functions/api/mcp/tools/executeWorkflow.ts:600-640`); a pipeline whose final read failed also answers
+    `pending`/`async: true`. `on_behalf_of` is accepted by generation tools only; the upload tools reject it.
   - The profile route answers an unknown, disabled or other-organization profile with the same HTTP 404
     (`functions/api/mcp/s/[publicId].ts:25-26`). The plugin never sends a per-call `api_key`, so
     `PROFILE_ORGANIZATION_MISMATCH` is not expected.
@@ -83,9 +92,14 @@
   - Media arguments accept only exact finalized URLs of the same organization; `x-loremax-media` (`version: 1`)
     gives `mediaType`, `role`, `cardinality`, `acceptedFormats`, `constraints`, `pairedWith`. Root
     `x-loremax-limits` gives the image/media position limits and the total bytes.
-  - REST check today answers HTTP 400 for terminal synchronous rows (`check.ts:183-190`). The hardening plan
-    changes this to 200 and adds `result.textContent` / `contentType`. Until that ships, a sync result must
-    never be handed to the watcher.
+  - REST check (`POST /api/v2/generations/:id/check` with the `lmx_prod_` key) is not rate-limited and now
+    answers HTTP 200 for terminal synchronous rows too (LoreMax b517f36e; «synchronous generations, which used to
+    get 400»). Its body is `{generationId, status: completed|failed|checking, completed, error?, errorType?,
+    result?: {previewUrls, originalUrls, externalUrls, contentTypes, textContent?}, contentType?, pipeline?}`;
+    a 500 whose body says `completed: true` is a terminal failure. The body's `completed`/`status` are
+    authoritative. A sync result is still finished directly from the execute reply (one fewer round trip), but
+    handing it to the watcher is no longer unsafe — the 0.1.0 comment in `index.mjs:546` («/check would answer
+    400») is stale and is corrected in Task 1.
   - The studio host dedupes `usage.record` by `(workspace, kind, ref)` (`host.ts:108-115`). `jobs.track` params
     survive until `settle`, which overwrites `result` (`host.ts:183-196`). `needsConfig` only flags the plugin
     and does not stop activation (`host.ts:234-240`). `PluginToolCall` has no abort signal, so handlers keep
@@ -146,7 +160,10 @@
 - **Checkbox placement**: Checkboxes belong only in Task sections (`### Task N:` or `### Iteration N:`). Do not put checkboxes in Success criteria, Overview, Context, Decisions, or Decision Log — they cause extra loop iterations.
 
 ## Decision Log
-- 2026-10-11 plan-review: **accepted** - background success with a synchronous result is finished directly and woken, never handed to the watcher (REST check answers 400 for sync rows today) — Task 1
+- 2026-10-11 plan-review: **accepted** - background success with a synchronous result is finished directly and woken, not handed to the watcher — Task 1. (2026-10-12 re-check: the original reason, «REST check answers 400 for sync rows», is gone since LoreMax b517f36e; the direct finish stays because it saves a round trip, not because polling would fail.)
+- 2026-10-12 contract re-check: **accepted** - Text outputs are read from the REST check's `result.textContent` (not rate-limited) instead of a generic `/api/mcp` `check_generation` call; the MCP call stays only as a fallback — Task 2
+- 2026-10-12 contract re-check: **accepted** - `on_behalf_of` is injected into generation calls only, never into `request_upload_url` / `finalize_upload` / `upload_from_url` (the upload tools reject it) — Tasks 7, 8
+- 2026-10-12 contract re-check: **accepted** - the `loremax_workflows` detail reply never truncates the schema itself (LoreMax publishes schemas up to 64 KB); the cap applies to the prose around it — Task 6
 - 2026-10-11 plan-review: **accepted** - restart-visible `submit:<uuid>` placeholder job and orphan handling in the watcher — Task 1
 - 2026-10-11 plan-review: **accepted** - the budget is deadline-aware end to end: fetch timeouts, Retry-After sleeps, and no inline `finish` near the deadline — Tasks 1, 2, 4
 - 2026-10-11 plan-review: **accepted** - the whole profile sequence (lookup, uploads, call, wait) runs inside the detached unit under one budget — Task 8
@@ -189,6 +206,7 @@
   - in every case settle the placeholder (`succeeded` with `{workspace, generationId}`, or `failed`) and remove it from `inFlight`.
 - [ ] watcher (`watchOnce`): a `submit:` row that is not in `inFlight` was left by a dead process. Settle it `failed` and wake the agent once with "the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again". Never call `check` for `submit:` rows. `loremax_result` and `fromRow` ignore them.
 - [ ] on cores without `ctx.jobs` or `ctx.wakeAgent` do not detach: keep the 0.1.0 blocking submission (the polling budget still applies)
+- [ ] fix the stale comment at `index.mjs:546` («/check would answer 400»): a sync reply is finished directly because its outputs are already in hand, not because the REST check would fail
 - [ ] write tests in `test/generate.test.mjs` / `test/result-watcher.test.mjs`:
   - defaults and clamping;
   - slow sync execute: returns `submitting`, later `finish` and wake with files, and no `/check` call;
@@ -209,7 +227,7 @@
   - audio: `audio/mpeg` mp3, `audio/wav` wav, `audio/mp4` m4a, `audio/ogg` ogg, `audio/flac` flac, `audio/aac` aac;
   - video: `video/x-matroska` mkv, `video/mp2t` ts, `video/x-m4v` m4v;
   - 3D: `model/gltf-binary` glb, `model/gltf+json` gltf, `model/obj` obj, `model/stl` stl, `model/vnd.usdz+zip` usdz, `model/fbx` fbx.
-- [ ] Text outputs. When `finish` is about to report a completed generation with no files and no text (from the sync execute reply, a REST check or the watcher), call generic `/api/mcp` `check_generation {generationId}` once. If it returns `text_content`, save it as `<slug>-<generationId>.md` in the task artifacts through the same provenance / annotate / mirror path. Text that is already in a reply (`textContent` / `text_content`) is saved directly.
+- [ ] Text outputs. Text that is already in a reply (`textContent` / `text_content`, from the execute reply or a REST check's `result.textContent`) is saved as `<slug>-<generationId>.md` in the task artifacts through the same provenance / annotate / mirror path. When `finish` is about to report a completed generation with no files and no text (a sync execute reply without URLs), call the REST `check` once (it now answers 200 for sync rows and carries `result.textContent`); only if that body has no `result` at all, fall back to one generic `/api/mcp` `check_generation {generationId}` and read `text_content`.
 - [ ] write tests:
   - usage `ref` is present in sync, async and watcher finishes (`test/save.test.mjs`, `test/result-watcher.test.mjs`);
   - `mcpCall` 429 retry and error code/details passthrough (`test/http.test.mjs`);
@@ -275,7 +293,7 @@
 
 ### Task 6: `loremax_workflows` in profile mode
 - [ ] in profile mode register `loremax_workflows` with schema `{tool?: string, query?: string}` and a mode-specific description (curated profile, free, no price). Without `tool`, list `{tool, title, category, description (first ~200 chars), required, file_args: [{name, mediaType, cardinality}]}`, filtered by `query` over tool, title, category and visualId.
-- [ ] with `tool`, return `{tool, title, description, schema: agentSchema, file_args (full), limits, how_to_call}` capped by `REPLY_CAP`. `how_to_call` explains that file arguments take workspace paths (`artifacts/…` or workdir files) and that conditional rules live in `x-loremax-conditions`. An unknown tool triggers one refresh, then "no such tool" with the list of names.
+- [ ] with `tool`, return `{tool, title, description, schema: agentSchema, file_args (full), limits, how_to_call}`. The cap never cuts `schema` (LoreMax publishes schemas up to 64 KB): when the reply exceeds `REPLY_CAP`, shorten `description` and `how_to_call` first and, if still over, raise the cap for this reply to the schema's size plus 2 KB. `how_to_call` explains that file arguments take workspace paths (`artifacts/…` or workdir files) and that conditional rules live in `x-loremax-conditions`. An unknown tool triggers one refresh, then "no such tool" with the list of names.
 - [ ] REST mode keeps the 0.1.0 behavior and description unchanged
 - [ ] write tests in `test/workflows.test.mjs`: profile list, query filter, details, reply cap, unknown-tool refresh, REST mode untouched
 - [ ] run `npm test` - must pass before task 7
@@ -294,7 +312,7 @@
   - images: the existing map;
   - models: canonical `model/*` (glb `model/gltf-binary`, gltf `model/gltf+json`, obj `model/obj`, stl `model/stl`, usdz `model/vnd.usdz+zip`, fbx `model/fbx`).
 - [ ] dedupe identical files within the call by sha256, then upload:
-  1. `request_upload_url {filename, mime, media_type, size_hint: exact size}` in batches of ≤ 50 messages;
+  1. `request_upload_url {filename, mime, media_type, size_hint: exact size}` in batches of ≤ 50 messages — no `on_behalf_of` and no `api_key` on any upload tool (they reject `on_behalf_of`);
   2. `PUT` each file with exactly the returned headers;
   3. `finalize_upload {asset_id}` in small chunks (≤ 5 files or ≤ 100 MiB per POST) with an rpc timeout scaled to the chunk bytes.
 
@@ -399,8 +417,10 @@
 *Items requiring manual intervention or external systems - no checkboxes, informational only*
 
 **Prerequisites for Stage 1**:
-- LoreMax plan `20261011-mcp-profiles-hardening` deployed (078 applied, `main` pushed); a studio profile created in
-  `/organization/mcp` and its URL put into the plugin config. Stage 0 can ship before that.
+- LoreMax `main` with the profiles and hardening is pushed (2026-10-12), but `docs/mcp-workflow-profiles.md` «External
+  rollout» says migration 078 on prod D1, the Pages deploy and the smoke checks have not been performed yet. Stage 1
+  can only be verified live after that, plus a studio profile created in `/organization/mcp` with its URL in the
+  plugin config. Stage 0 needs none of it.
 
 **Manual verification**:
 - On a studio instance:
