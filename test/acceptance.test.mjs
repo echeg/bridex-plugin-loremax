@@ -95,6 +95,26 @@ test("inputs without prompt: the job label and provenance note come from note; n
   assert.equal(s.gens()[1].label, "7 tk");
 });
 
+test("plugin.yaml parses as YAML with the host's parser (a bare colon in a description broke 0.2.0 at load)", async () => {
+  const src = fs.readFileSync(new URL("../plugin.yaml", import.meta.url), "utf8");
+  // the Bridex host loads manifests with the `yaml` package; without it here, fall back to node's own strict check
+  let parse;
+  try {
+    ({ parse } = await import("yaml"));
+  } catch {
+    parse = null;
+  }
+  if (parse) {
+    const m = parse(src);
+    assert.equal(m.name, "loremax");
+    assert.deepEqual(Object.keys(m.config_schema.properties), ["api_key", "base_url", "default_wait_s", "usd_per_token", "profile_url"]);
+  }
+  // every plain-scalar description must not contain ": " — that is a nested mapping to any YAML parser
+  for (const [, line] of src.matchAll(/^ +description: (?!["'|>])(.*)$/gm)) {
+    assert.ok(!/: /.test(line), `unquoted description with a colon: ${line}`);
+  }
+});
+
 test("plugin.yaml: every config_schema property has a default in createClient", () => {
   const yaml = fs.readFileSync(new URL("../plugin.yaml", import.meta.url), "utf8");
   const props = yaml.split("\n  properties:\n")[1];

@@ -36,7 +36,7 @@ config_schema:
       default: 45
       minimum: 10
       maximum: 50
-      description: How long loremax_generate waits for a result before handing back (10..50 s: agents' MCP client gives up at 60 s)
+      description: "How long loremax_generate waits for a result before handing back (10..50 s: agents' MCP client gives up at 60 s)"
     usd_per_token:
       type: number
       title: USD per token
