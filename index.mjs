@@ -2052,7 +2052,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         if (!active) break;
         if (inFlight.has(j.externalId)) continue;
         if (unsaved.has(j.externalId) && now() - Date.parse(j.createdAt) <= GIVE_UP_MS) continue;
-        if ((nextCheck.get(j.externalId) ?? 0) > passAt) continue;
+        // half a tick of slack: setInterval's clock and Date.now() drift apart, so passes
+        // can land 14 999 ms apart, and a due row must not wait a whole extra tick
+        if ((nextCheck.get(j.externalId) ?? 0) > passAt + WATCH_MS / 2) continue;
         // the list is read once per pass and a pass can take minutes (downloads):
         // a tool call may have finished this one meanwhile — don't save, bill and wake twice
         const cur = ctx.jobs.find?.(j.externalId);

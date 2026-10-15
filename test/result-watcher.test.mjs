@@ -304,6 +304,22 @@ test("watcher: a pending generation is checked every 15 s under 2 min, every 60 
   assert.equal(s.rec.wakes.length, 1);
 });
 
+test("watcher: a tick a millisecond early still checks a due generation", async () => {
+  const s = await setup();
+  s.track();
+  const born = s.clock.t;
+  s.jobs[0].createdAt = new Date(born).toISOString();
+  const at = [];
+  const f = mockFetch([["POST", "/api/v2/generations/501/check", () => (at.push(s.clock.t - born), { status: "pending" })]]);
+  restore = f.restore;
+  // setInterval's millisecond clock and Date.now() drift apart: passes 14 999 ms apart
+  for (const t of [0, 14_999, 30_000, 44_999, 60_000]) {
+    s.clock.t = born + t;
+    await s.watchOnce();
+  }
+  assert.deepEqual(at, [0, 14_999, 30_000, 44_999, 60_000]);
+});
+
 test("watcher: the schedule counts from the pass start — a row checked late in a slow pass is still due on its tick", async () => {
   const s = await setup();
   s.track();
