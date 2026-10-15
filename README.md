@@ -178,8 +178,9 @@ These are thrown as tool errors instead:
 - a refused upload, or a call that ran out of time before the paid request
   ("nothing was charged");
 - a redirect from LoreMax ("redirected — refused, the key must not leave
-  <host>"): it is never followed, so the request did not reach the other host —
-  a definite refusal, not a "may have been charged" one;
+  <host>"): it is never followed, so the request did not reach the other host;
+  on the paid request it is a "may have been charged" one, since LoreMax may
+  have accepted the call before redirecting;
 - a paid request that got no usable reply (timeout, dropped connection, a
   JSON-RPC error or an unreadable result): the generation may already have been
   charged, so the agent checks LoreMax before running it again.

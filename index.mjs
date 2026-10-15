@@ -124,8 +124,9 @@ function httpError(message, status, body) {
 /**
  * A paid request that ended without LoreMax's answer — a timeout, a dropped
  * connection (fetch's TypeError), a gateway 5xx without LoreMax's own JSON body
- * (an edge 502/524 cutting a long sync render) or a 2xx whose body is unreadable
- * (LoreMax answered, so it most likely ran) — leaves the outcome unknown:
+ * (an edge 502/524 cutting a long sync render), a 2xx whose body is unreadable
+ * (LoreMax answered, so it most likely ran) or a refused redirect (status 0: a
+ * 302/303 after a POST may follow an accepted one) — leaves the outcome unknown:
  * LoreMax may already have taken the tokens and be rendering. → the
  * may-have-been-charged error (`ambiguous`), or `e` itself for a definite outcome.
  */
@@ -135,7 +136,7 @@ function unanswered(e, what) {
     body = JSON.parse(e?.body ?? "");
   } catch {}
   const unknown = e?.status != null
-    ? (e.status >= 200 && e.status < 300) || (e.status >= 500 && (body == null || typeof body !== "object"))
+    ? e.status === 0 || (e.status >= 200 && e.status < 300) || (e.status >= 500 && (body == null || typeof body !== "object"))
     : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
   if (!unknown) return e;
   return Object.assign(
@@ -232,7 +233,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
       } catch (e) {
         // cut short by the deadline, not by the request's own timeout
         if (ms < timeoutMs && e?.name === "TimeoutError") throw deadlineError(label);
-        // LoreMax answered with a redirect: a definite refusal (status 0), not a dropped connection
+        // LoreMax answered with a redirect: refused (status 0), not a dropped connection
         if (e instanceof TypeError && /redirect/i.test(e.cause?.message ?? "")) {
           throw httpError(`loremax ${label}: redirected — refused, the key must not leave ${new URL(url).host}`, 0, "");
         }
@@ -1121,9 +1122,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   /**
    * What finish needs beyond the job row, by LoreMax generation id. Lost on a
    * restart: then rebuilt from the row's track() params, or on older cores from
-   * job.model and job.label only. A re-activation that replaces the watcher takes
-   * the previous one's map over (see the watcher start): a synchronous result
-   * older cores keep nowhere else must not be lost.
+   * job.model and job.label only. A re-activation takes the previous instance's
+   * map over, with or without a shutdown in between (see the watcher start): a
+   * synchronous result older cores keep nowhere else must not be lost.
    */
   const generations = globalThis[WATCHER_SLOT]?.generations ?? new Map();
   /** The job a generation id stands for after a restart: from the row's params, else its label. */
@@ -2152,8 +2153,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     ctx.onShutdown?.(() => {
       clearInterval(watcher);
       stop();
-      // a late shutdown of an older instance leaves the current watcher alone
-      if (globalThis[slot]?.interval === watcher) delete globalThis[slot];
+      // a late shutdown of an older instance leaves the current watcher alone; the jobs stay for the next activation
+      if (globalThis[slot]?.interval === watcher) globalThis[slot] = { generations };
     });
   }
 

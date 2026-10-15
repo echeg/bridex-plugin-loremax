@@ -1355,16 +1355,25 @@ test("older core: uploads that leave under 15 s abort before the paid call; a re
   assert.equal(s.genCalls()[0].arguments.source, "https://cdn.test/a1");
 });
 
-test("a redirect on the paid request is a definite refusal, not a may-have-been-charged one", async () => {
+test("a redirect on the paid request is refused, and may have been charged: a 303 can follow an accepted POST", async () => {
   const s = await setup();
-  const f = mockFetch([["POST", "/api/v2/workflow/execute", () => new Response("", { status: 302, headers: { Location: "https://evil.test/" } })]]);
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => new Response("", { status: 303, headers: { Location: "https://evil.test/" } })],
+    ["GET", "evil.test", () => ({ ok: true })],
+  ]);
   restore = f.restore;
   const err = await s.run({ workflow_id: "w", inputs: { prompt: "p" } }).catch((e) => e);
-  assert.match(err.message, /redirected — refused, the key must not leave lm\.test/);
-  assert.doesNotMatch(err.message, /may have accepted and charged/);
-  assert.notEqual(err.ambiguous, true);
+  assert.match(err.message, /redirected — refused, the key must not leave lm\.test.*may have accepted and charged/);
+  assert.equal(err.ambiguous, true);
   assert.equal(f.calls.length, 1);
   assert.equal(s.gens().length, 0);
+});
+
+test("profile: a redirect on the paid call may have been charged", async () => {
+  const redirect = (req) => (req.json?.method === "tools/call" && req.json.params.name === "write_text" ? new Response("", { status: 302, headers: { Location: "https://evil.test/" } }) : null);
+  const s = await profileSetup({ onPost: redirect });
+  await assert.rejects(s.run({ tool: "write_text", arguments: { text: "hi" } }), (e) => e.ambiguous === true && /redirected — refused.*may have accepted and charged/.test(e.message));
+  assert.equal(s.rec.usage.length, 0);
 });
 
 // ---------- duplicate submissions ----------

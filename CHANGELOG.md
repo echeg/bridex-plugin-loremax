@@ -11,14 +11,15 @@ leaving LoreMax on a redirect, and a watcher that spent the organization's rate 
   `status: "submitting"` with `duplicate_of` naming the running submission and the "do NOT call again" hint. The
   request is free again once LoreMax accepts or refuses the first one. Works on cores without `ctx.jobs` too.
 - **The key stays on LoreMax**: API requests (REST and `/api/mcp`) no longer follow redirects — a 3xx is refused
-  with "redirected — refused, the key must not leave <host>" instead of resending `X-API-Key` to the new host.
+  with "redirected — refused, the key must not leave <host>" instead of resending `X-API-Key` to the new host. On the
+  paid request it is reported as "may have been charged": LoreMax may have accepted the call before redirecting.
   `base_url` / `LOREMAX_BASE_URL` and `profile_url` accept `https://` only; an `http://` value is a config error that
   names the setting, raised on the plugin card at activation. The health check reports both with their own message.
 - **A quiet watcher**: a pending generation is checked every 15 s while under 2 min old, every 60 s until 30 min,
   every 5 min after that (the 6 h give-up stays), so long generations no longer eat LoreMax's 1000 requests an hour
   and push paid calls into 429. A failed check keeps the schedule. One watcher runs per process: a re-activation
   (settings save, update, dashboard toggle) stops the previous one instead of starting a second, and takes its in-memory
-  jobs over.
+  jobs over, with or without a shutdown in between.
 
 Upgrading from 0.2.0: a `base_url` or `profile_url` starting with `http://` must be changed to `https://`.
 

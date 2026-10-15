@@ -458,6 +458,34 @@ test("watcher: a re-activation takes the running instance's in-memory jobs over 
   }
 });
 
+test("watcher: a re-activation after a shutdown still takes the in-memory jobs over", async () => {
+  const s = await setup();
+  const track = s.ctx.jobs.track;
+  s.ctx.jobs.track = ({ params, ...input }) => track(input);
+  s.clock.tick = 5_000;
+  let done = false;
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 501, tokensCost: 7, async: true })],
+    checkRoute(s, [() => (done ? DONE : { status: "pending" })]),
+    PNG,
+  ]);
+  restore = f.restore;
+  const gen = s.rec.tools.get("loremax_generate");
+  const first = JSON.parse((await gen.handler({ workflow_id: "flux-portrait", inputs: { prompt: "rain" }, wait_s: 10 }, CALL)).content[0].text);
+  assert.equal(first.status, "in_progress");
+  // a settings save on a host that shuts the old instance down first
+  for (const fn of s.rec.shutdown) fn();
+  const again = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+  try {
+    done = true;
+    await again.watchOnce();
+    assert.equal(s.jobs.find((j) => j.externalId === "501").status, "succeeded");
+    assert.deepEqual(s.rec.annotate[0].meta.generation.params, { prompt: "rain" });
+  } finally {
+    for (const fn of s.rec.shutdown) fn();
+  }
+});
+
 test("watcher: arms an interval that is cleared on shutdown", async () => {
   const { setInterval: realSet, clearInterval: realClear } = globalThis;
   // the previous test's watcher: not part of this count
