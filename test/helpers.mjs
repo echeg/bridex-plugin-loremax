@@ -72,12 +72,15 @@ export function fakeCtx({ config = {} } = {}) {
 /**
  * Replace globalThis.fetch with a router: routes are [method, url-substring or RegExp, handler],
  * handler(req) → Response | plain object (sent as JSON 200). Every request is recorded with its
- * headers and body (string, parsed JSON when possible, or the FormData itself).
+ * headers, body (string, parsed JSON when possible, or the FormData itself) and redirect mode.
+ * A 3xx with Location behaves like Node's fetch: `redirect: "error"` throws its TypeError, the
+ * default follows with the same headers (custom ones like X-API-Key included) — 307/308 keep the
+ * method and body, the rest turn into a GET.
  */
 export function mockFetch(routes) {
   const calls = [];
   const original = globalThis.fetch;
-  globalThis.fetch = async (url, init = {}) => {
+  const fake = async (url, init = {}) => {
     const method = (init.method ?? "GET").toUpperCase();
     const headers = Object.fromEntries(new Headers(init.headers ?? {}).entries());
     let body = init.body;
@@ -87,13 +90,19 @@ export function mockFetch(routes) {
         json = JSON.parse(body);
       } catch {}
     }
-    const req = { url: String(url), method, headers, body, json };
+    const req = { url: String(url), method, headers, body, json, redirect: init.redirect ?? "follow" };
     calls.push(req);
     const route = routes.find(([m, match]) => m === method && (match instanceof RegExp ? match.test(req.url) : req.url.includes(match)));
     if (!route) return new Response(`no mock for ${method} ${req.url}`, { status: 404 });
     const out = await route[2](req, calls);
-    return out instanceof Response ? out : jsonResponse(out);
+    const res = out instanceof Response ? out : jsonResponse(out);
+    const location = res.headers.get("location");
+    if (res.status < 300 || res.status >= 400 || !location || req.redirect === "manual") return res;
+    if (req.redirect === "error") throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") });
+    const keep = res.status === 307 || res.status === 308;
+    return fake(new URL(location, req.url).href, { ...init, method: keep ? init.method : "GET", body: keep ? init.body : undefined });
   };
+  globalThis.fetch = fake;
   return { calls, restore: () => (globalThis.fetch = original) };
 }
 

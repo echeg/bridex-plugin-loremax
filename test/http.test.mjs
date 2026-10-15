@@ -376,3 +376,46 @@ test("toolCall: an out-of-funds error opens the billing card exactly once", asyn
   await assert.rejects(c.toolCall(PROFILE, "flux_portrait", {}), /loremax 402/);
   assert.equal(rec.outOfFunds.length, 2);
 });
+
+// a redirect must not carry the key off the LoreMax host (nik-devs review, finding 3)
+const redirectAway = (status = 302) => () => new Response("", { status, headers: { Location: "https://evil.test/steal" } });
+
+test("restJson: a redirect is refused — the key never reaches the other host", async () => {
+  for (const status of [301, 302, 307, 308]) {
+    const f = mockFetch([["GET", "/api/v1/workflows", redirectAway(status)], ["GET", "evil.test", () => ({ ok: true })]]);
+    restore = f.restore;
+    const err = await client().c.restJson("/api/v1/workflows").catch((e) => e);
+    restore();
+    assert.ok(err instanceof Error, `HTTP ${status} must throw`);
+    assert.match(err.message, /^loremax \/api\/v1\/workflows: redirected — refused, the key must not leave lm\.test/);
+    assert.equal(err.status, 0);
+    assert.equal(f.calls.length, 1, `HTTP ${status}: one request, no follow`);
+    assert.equal(f.calls[0].redirect, "error");
+    assert.ok(!f.calls.some((c) => c.url.includes("evil.test")));
+  }
+});
+
+test("mcpCall / rpc: a redirect is refused — the Bearer key never reaches the other host", async () => {
+  const f = mockFetch([["POST", "/api/mcp", redirectAway(307)], ["POST", "evil.test", () => mcpResult({ remaining: 1 })]]);
+  restore = f.restore;
+  await assert.rejects(client().c.mcpCall("get_balance", {}), /loremax \/api\/mcp get_balance: redirected — refused, the key must not leave lm\.test/);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].redirect, "error");
+  assert.ok(!f.calls.some((c) => c.url.includes("evil.test")));
+});
+
+test("a redirect is a definite refusal, not a may-have-been-charged transport failure", async () => {
+  const f = mockFetch([["POST", "/api/v2/workflow/execute", redirectAway()]]);
+  restore = f.restore;
+  const err = await client().c.restJson("/api/v2/workflow/execute", { method: "POST", body: "{}" }).catch((e) => e);
+  assert.equal(err.status, 0);
+  assert.notEqual(err.ambiguous, true);
+});
+
+test("a dropped connection is still the fetch TypeError, not a redirect", async () => {
+  const f = mockFetch([["GET", "/api/v1/workflows", () => { throw new TypeError("fetch failed", { cause: new Error("other side closed") }); }]]);
+  restore = f.restore;
+  const err = await client().c.restJson("/api/v1/workflows").catch((e) => e);
+  assert.ok(err instanceof TypeError);
+  assert.doesNotMatch(err.message, /redirect/);
+});

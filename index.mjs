@@ -161,7 +161,10 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   const baseUrl = () => {
     const raw = resolveRef(cfg.base_url || "${LOREMAX_BASE_URL}").trim().replace(/\/+$/, "");
     if (!raw) return DEFAULT_BASE_URL;
-    if (!/^https?:\/\/[^/]/i.test(raw)) throw new Error(`LOREMAX_BASE_URL must be an http(s) URL, got "${raw}"`);
+    // the key rides on every request: never in clear text
+    if (!/^https:\/\/[^/]/i.test(raw)) {
+      throw Object.assign(new Error(`LOREMAX_BASE_URL must be an https:// URL (Settings → Integrations → LoreMax, or plugins.loremax.config.base_url), got "${raw.slice(0, 200)}"`), { config: true });
+    }
     return raw;
   };
   /**
@@ -181,7 +184,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     } catch {
       throw bad("is neither a profile URL nor a publicId");
     }
-    if (u.protocol !== "http:" && u.protocol !== "https:") throw bad("must be an http(s) URL");
+    if (u.protocol !== "https:") throw bad("must be an https:// URL");
     const base = new URL(baseUrl()).origin;
     if (u.origin !== base) throw bad(`is on ${u.origin}, not on the LoreMax base URL ${base}`);
     const m = /^\/api\/mcp\/s\/([A-Za-z0-9]{16})\/?$/.exec(u.pathname);
@@ -215,11 +218,16 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
       let res;
       let body;
       try {
-        res = await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+        // a redirect would carry the key to wherever Location points: refused, never followed
+        res = await fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(ms) });
         body = await res.text();
       } catch (e) {
         // cut short by the deadline, not by the request's own timeout
         if (ms < timeoutMs && e?.name === "TimeoutError") throw deadlineError(label);
+        // LoreMax answered with a redirect: a definite refusal (status 0), not a dropped connection
+        if (e instanceof TypeError && /redirect/i.test(e.cause?.message ?? "")) {
+          throw httpError(`loremax ${label}: redirected — refused, the key must not leave ${new URL(url).host}`, 0, "");
+        }
         throw e;
       }
       if (res.status === 429) {
@@ -2037,8 +2045,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         ? { ok: true, message: `${reach} · ${remaining} tk left` }
         : { ok: false, message: `${reach}, but the balance is empty — top up LoreMax` };
     } catch (e) {
-      // the 404 message already names the three causes and the fix
-      if (e?.code === "PROFILE_NOT_FOUND") return { ok: false, message: e.message };
+      // these messages already name the cause and the fix: a 404 profile, a config error, a refused redirect
+      if (e?.code === "PROFILE_NOT_FOUND" || e?.config || e?.status === 0) return { ok: false, message: e.message };
       return { ok: false, message: `LoreMax refused the key (${e?.status ?? short(e?.message ?? e)})` };
     }
   });

@@ -83,17 +83,20 @@
 ## Implementation Steps
 
 ### Task 1: API requests never follow a redirect, base_url and profile_url are https only
-- [ ] write failing tests in `test/http.test.mjs`: a `mockFetch` route answering 302 with `Location` on another
+- [x] write failing tests in `test/http.test.mjs`: a `mockFetch` route answering 302 with `Location` on another
       host makes `restJson` and the MCP call throw an error naming the redirect, and the second host receives no
       request (no `X-API-Key` anywhere but `base_url`); with `redirect: "error"` asserted on the fetch init
-- [ ] write failing tests in `test/config.test.mjs`: `base_url: http://…` and `LOREMAX_BASE_URL=http://…` throw
+- [x] write failing tests in `test/config.test.mjs`: `base_url: http://…` and `LOREMAX_BASE_URL=http://…` throw
       a config error that names the setting and says https; `profile_url: http://…` likewise; `https://` values
       pass as before
-- [ ] `index.mjs` `send()`: `fetch(url, { ...init, redirect: "error", signal })`; map the resulting `TypeError`
+- [x] `index.mjs` `send()`: `fetch(url, { ...init, redirect: "error", signal })`; map the resulting `TypeError`
       to `httpError("loremax <label>: redirected — refused, the key must not leave <base host>", 0, "")`
-- [ ] `index.mjs` `baseUrl()` / `profilePath()`: accept `https://` only, error text names `LOREMAX_BASE_URL` /
+- [x] `index.mjs` `baseUrl()` / `profilePath()`: accept `https://` only, error text names `LOREMAX_BASE_URL` /
       `plugins.loremax.config.base_url` (or `profile_url`)
-- [ ] run `node --test test/` - must pass before task 2
+- [x] ➕ health check: a redirect (status 0) or a config error (http:// base_url) is reported with its own message,
+      not as "LoreMax refused the key (0)" (`test/health.test.mjs`); `mockFetch` emulates Node's fetch on a 3xx
+      (`redirect: "error"` throws its TypeError, the default follows with the same headers)
+- [x] run `node --test test/` - must pass before task 2
 
 ### Task 2: an identical submission in flight is refused, not charged twice
 - [ ] write failing tests in `test/generate.test.mjs` (REST and profile mode): with a `mockFetch` execute route

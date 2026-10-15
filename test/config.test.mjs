@@ -27,12 +27,21 @@ test("base_url defaults to https://loremax.ai", () => {
 test("base_url from the credential loses trailing slashes", () => {
   restoreEnv = withEnv({ LOREMAX_BASE_URL: "https://lm.example.com///" });
   assert.equal(createClient(fakeCtx().ctx).baseUrl(), "https://lm.example.com");
-  assert.equal(createClient(fakeCtx({ config: { base_url: "http://localhost:8788/" } }).ctx).baseUrl(), "http://localhost:8788");
+  assert.equal(createClient(fakeCtx({ config: { base_url: "https://localhost:8788/" } }).ctx).baseUrl(), "https://localhost:8788");
 });
 
-test("base_url rejects non-http schemes", () => {
-  const c = createClient(fakeCtx({ config: { base_url: "ftp://loremax.ai" } }).ctx);
-  assert.throws(() => c.baseUrl(), /LOREMAX_BASE_URL must be an http\(s\) URL/);
+test("base_url is https only: http and other schemes are a config error naming the setting", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: undefined });
+  const fromConfig = (base_url) => () => createClient(fakeCtx({ config: { base_url } }).ctx).baseUrl();
+  for (const v of ["http://loremax.ai", "HTTP://localhost:8788", "ftp://loremax.ai", "loremax.ai"])
+    assert.throws(fromConfig(v), (e) =>
+      e.config === true && /LOREMAX_BASE_URL/.test(e.message) && /plugins\.loremax\.config\.base_url/.test(e.message) && /https/.test(e.message) && e.message.includes(v));
+  assert.equal(fromConfig("HTTPS://lm.example.com")(), "HTTPS://lm.example.com");
+});
+
+test("LOREMAX_BASE_URL=http://… from the credential is refused the same way", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: "http://lm.example.com" });
+  assert.throws(() => createClient(fakeCtx().ctx).baseUrl(), (e) => e.config === true && /LOREMAX_BASE_URL must be an https:\/\/ URL/.test(e.message));
 });
 
 test("usd_per_token: unset, empty or negative → 0", () => {
@@ -78,7 +87,7 @@ test("profile_url: empty → REST mode, bare publicId and full profile URL → t
   assert.equal(path({ profile_url: "${MY_PROFILE}" }), `/api/mcp/s/${PID}`);
   assert.equal(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}` }), `/api/mcp/s/${PID}`);
   assert.equal(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}/` }), `/api/mcp/s/${PID}`);
-  assert.equal(path({ base_url: "http://localhost:8788/", profile_url: `http://localhost:8788/api/mcp/s/${PID}` }), `/api/mcp/s/${PID}`);
+  assert.equal(path({ base_url: "https://localhost:8788/", profile_url: `https://localhost:8788/api/mcp/s/${PID}` }), `/api/mcp/s/${PID}`);
 });
 
 test("profile_url: foreign origin, bad path, non-http → a config error naming the value", () => {
@@ -87,12 +96,13 @@ test("profile_url: foreign origin, bad path, non-http → a config error naming 
   // the key must not go to another host: both origins are named
   assert.throws(path({ profile_url: `https://evil.example.com/api/mcp/s/${PID}` }), (e) =>
     e.config === true && /https:\/\/evil\.example\.com/.test(e.message) && /https:\/\/loremax\.ai/.test(e.message));
-  assert.throws(path({ profile_url: `http://loremax.ai/api/mcp/s/${PID}` }), /not on the LoreMax base URL https:\/\/loremax\.ai/);
+  assert.throws(path({ profile_url: `http://loremax.ai/api/mcp/s/${PID}` }), (e) =>
+    e.config === true && /profile_url "http:\/\/loremax\.ai/.test(e.message) && /must be an https:\/\/ URL/.test(e.message));
   assert.throws(path({ profile_url: "https://loremax.ai/api/mcp" }), /is not a profile URL/);
   assert.throws(path({ profile_url: "https://loremax.ai/api/mcp/s/short" }), /is not a profile URL/);
   assert.throws(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}/extra` }), /is not a profile URL/);
   assert.throws(path({ profile_url: `https://loremax.ai/api/mcp/s/${PID}?x=1` }), /is not a profile URL/);
-  assert.throws(path({ profile_url: `ftp://loremax.ai/api/mcp/s/${PID}` }), /must be an http\(s\) URL/);
+  assert.throws(path({ profile_url: `ftp://loremax.ai/api/mcp/s/${PID}` }), /must be an https:\/\/ URL/);
   assert.throws(path({ profile_url: "not a url" }), /neither a profile URL nor a publicId/);
   assert.throws(path({ profile_url: "AbCdEfGh1234567" }), (e) => e.config === true && /profile_url "AbCdEfGh1234567"/.test(e.message));
 });

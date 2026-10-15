@@ -128,3 +128,20 @@ test("REST mode: check and stat still read the balance on /api/mcp, with no tool
   assert.deepEqual(await s.stat(), [{ label: "LoreMax balance", value: "750 tk", sub: "balance", balance: 0.75, low: false }]);
   assert.ok(f.calls.every((c) => c.url === `${BASE}/api/mcp` && c.json.params.name === "get_balance"));
 });
+
+test("check: a redirect or an http:// base_url is reported as itself, not as a refused key", async () => {
+  const f = mockFetch([["POST", PROFILE_PATH, () => new Response("", { status: 302, headers: { Location: "https://evil.test/" } })]]);
+  restore = f.restore;
+  const s = await setup();
+  const r = await s.check();
+  assert.equal(r.ok, false);
+  assert.match(r.message, /redirected — refused, the key must not leave lm\.test/);
+  assert.doesNotMatch(r.message, /refused the key/);
+
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: "http://lm.test" } });
+  await activate(ctx);
+  const plain = await rec.checks[0]();
+  assert.equal(plain.ok, false);
+  assert.match(plain.message, /LOREMAX_BASE_URL must be an https:\/\/ URL/);
+  assert.equal(f.calls.length, 1, "nothing is sent to an http:// base_url");
+});
