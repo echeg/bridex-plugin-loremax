@@ -266,8 +266,101 @@ test("watcher: a job past 6h whose /check keeps failing is given up", async () =
   assert.match(s.rec.wakes[0].prompt, /6h/);
 });
 
+const WATCHER = Symbol.for("bridex.loremax.watcher");
+
+test("watcher: a pending generation is checked every 15 s under 2 min, every 60 s under 30 min, every 5 min after", async () => {
+  const s = await setup();
+  s.track();
+  const born = s.clock.t;
+  s.jobs[0].createdAt = new Date(born).toISOString();
+  const at = [];
+  let done = false;
+  const f = mockFetch([
+    ["POST", "/api/v2/generations/501/check", () => {
+      at.push(s.clock.t - born);
+      return done ? DONE : { status: "pending" };
+    }],
+    PNG,
+  ]);
+  restore = f.restore;
+  // the host ticks every 15 s for a simulated hour
+  for (let t = 0; t <= 3_600_000; t += 15_000) {
+    s.clock.t = born + t;
+    await s.watchOnce();
+  }
+  const cadence = (age) => (age <= 120_000 ? 15_000 : age <= 1_800_000 ? 60_000 : 300_000);
+  for (let i = 1; i < at.length; i++) assert.equal(at[i] - at[i - 1], cadence(at[i - 1]), `check ${i} at ${at[i]} ms`);
+  // 9 in the first 2 min, 28 until 30 min, 6 after — instead of 241
+  assert.equal(at.filter((a) => a <= 120_000).length, 9);
+  assert.equal(at.filter((a) => a > 120_000 && a <= 1_800_000).length, 28);
+  assert.equal(at.filter((a) => a > 1_800_000).length, 6);
+  assert.equal(s.jobs[0].status, "running");
+  // a completed check at the next due time still saves and wakes
+  done = true;
+  s.clock.t = born + at.at(-1) + 300_000;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "succeeded");
+  assert.ok(fs.existsSync(path.join(s.art, "task-9/flux-portrait-501.png")));
+  assert.equal(s.rec.wakes.length, 1);
+});
+
+test("watcher: a failed /check keeps the schedule, no tight retry", async () => {
+  const s = await setup();
+  s.track();
+  const born = s.clock.t - 10 * 60_000;
+  s.jobs[0].createdAt = new Date(born).toISOString();
+  const f = mockFetch([["POST", "/api/v2/generations/501/check", () => new Response("bad gateway", { status: 502 })]]);
+  restore = f.restore;
+  const start = s.clock.t;
+  for (let t = 0; t < 60_000; t += 15_000) {
+    s.clock.t = start + t;
+    await s.watchOnce();
+  }
+  assert.equal(f.calls.length, 1);
+  s.clock.t = start + 60_000;
+  await s.watchOnce();
+  assert.equal(f.calls.length, 2);
+  assert.equal(s.jobs[0].status, "running");
+});
+
+test("watcher: a second activation clears the first one's interval, one watcher per process", async () => {
+  const { setInterval: realSet, clearInterval: realClear } = globalThis;
+  clearInterval(globalThis[WATCHER]?.interval);
+  const armed = [];
+  const cleared = [];
+  globalThis.setInterval = (...a) => {
+    const t = realSet(...a);
+    armed.push(t);
+    return t;
+  };
+  globalThis.clearInterval = (t) => {
+    cleared.push(t);
+    realClear(t);
+  };
+  try {
+    const s = await setup();
+    // update / settings save / dashboard toggle: the host activates again without a shutdown
+    await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+    assert.equal(armed.length, 2);
+    assert.ok(cleared.includes(armed[0]));
+    assert.ok(!cleared.includes(armed[1]));
+    assert.equal(globalThis[WATCHER].interval, armed[1]);
+    // the first instance's late shutdown does not stop the second one's watcher
+    s.rec.shutdown[0]();
+    assert.ok(!cleared.includes(armed[1]));
+    assert.equal(globalThis[WATCHER].interval, armed[1]);
+    s.rec.shutdown[1]();
+    assert.ok(cleared.includes(armed[1]));
+  } finally {
+    Object.assign(globalThis, { setInterval: realSet, clearInterval: realClear });
+  }
+});
+
 test("watcher: arms an interval that is cleared on shutdown", async () => {
   const { setInterval: realSet, clearInterval: realClear } = globalThis;
+  // the previous test's watcher: not part of this count
+  clearInterval(globalThis[WATCHER]?.interval);
+  delete globalThis[WATCHER];
   const armed = [];
   const cleared = [];
   globalThis.setInterval = (...a) => {

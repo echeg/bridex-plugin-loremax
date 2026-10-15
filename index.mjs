@@ -51,6 +51,12 @@ const LOOKUP_TIMEOUT_MS = 10_000;
 /** The reboot-proof watcher's pass over pending jobs, and when it gives a generation up. */
 const WATCH_MS = 15_000;
 const GIVE_UP_MS = 6 * 3_600_000;
+/**
+ * How long the watcher waits before checking a pending generation again, by its
+ * age: most finish within minutes, and every /check counts against the
+ * organization's 1000 requests/hour that paid calls share.
+ */
+const checkEveryMs = (ageMs) => (ageMs <= 120_000 ? 15_000 : ageMs <= 1_800_000 ? 60_000 : 300_000);
 /** The dashboard polls stat tiles; LoreMax's balance is read at most once a minute. */
 const BALANCE_TTL_MS = 60_000;
 /** A LoreMax MCP profile's publicId: 16 alphanumerics, served at /api/mcp/s/<publicId>. */
@@ -1989,13 +1995,24 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // finished generations whose save failed here: the agent was woken with the error and
   // saves them with loremax_result — not downloaded again every pass (until the 6h give-up)
   const unsaved = new Set();
+  // generation id → when the watcher checks it next (see checkEveryMs). Per activation:
+  // only one watcher runs, and a fresh one checks every pending job once first
+  const nextCheck = new Map();
   async function watchOnce() {
     if (watching || !ctx.jobs) return;
     watching = true;
     try {
-      for (const j of ctx.jobs.pending()) {
+      // the schedule counts from the pass's start, not from each /check: a later
+      // row in a slow pass is still due on the tick its cadence lands on
+      const passAt = now();
+      const rows = ctx.jobs.pending();
+      // settled meanwhile (here, by a tool call or elsewhere): forget its schedule
+      const pendingIds = new Set(rows.map((j) => j.externalId));
+      for (const id of nextCheck.keys()) if (!pendingIds.has(id)) nextCheck.delete(id);
+      for (const j of rows) {
         if (inFlight.has(j.externalId)) continue;
         if (unsaved.has(j.externalId) && now() - Date.parse(j.createdAt) <= GIVE_UP_MS) continue;
+        if ((nextCheck.get(j.externalId) ?? 0) > passAt) continue;
         // the list is read once per pass and a pass can take minutes (downloads):
         // a tool call may have finished this one meanwhile — don't save, bill and wake twice
         const cur = ctx.jobs.find?.(j.externalId);
@@ -2020,6 +2037,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           // paid for and must still be saved — only a still-pending (or unreachable) one is given up
           const job = { ...(generations.get(j.externalId) ?? fromRow(j.externalId, j, cur)), trackedId: j.id };
           let c = null;
+          // a failed /check keeps this schedule too: no tight retry against a rate limit
+          nextCheck.set(j.externalId, passAt + checkEveryMs(passAt - Date.parse(j.createdAt)));
           try {
             c = await statusOf(job);
           } catch (e) {
@@ -2074,10 +2093,23 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       watching = false;
     }
   }
+  // One watcher per process: an update, settings save or dashboard toggle activates
+  // the plugin again without always shutting the old instance down, and two watchers
+  // would poll every pending job twice. The handle is process-wide for that reason.
+  const slot = Symbol.for("bridex.loremax.watcher");
+  if (globalThis[slot]) {
+    clearInterval(globalThis[slot].interval);
+    delete globalThis[slot];
+  }
   if (ctx.jobs) {
     const watcher = setInterval(watchOnce, WATCH_MS);
     watcher.unref?.();
-    ctx.onShutdown?.(() => clearInterval(watcher));
+    globalThis[slot] = { interval: watcher };
+    ctx.onShutdown?.(() => {
+      clearInterval(watcher);
+      // a late shutdown of an older instance leaves the current watcher alone
+      if (globalThis[slot]?.interval === watcher) delete globalThis[slot];
+    });
   }
 
   /**

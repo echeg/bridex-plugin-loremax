@@ -117,19 +117,25 @@
 - [x] run `node --test test/` - must pass before task 3
 
 ### Task 3: one watcher per process, polling that slows down with a job's age
-- [ ] write failing tests in `test/result-watcher.test.mjs`: with a controlled `now`, a pending generation is
+- [x] write failing tests in `test/result-watcher.test.mjs`: with a controlled `now`, a pending generation is
       checked at most once per 15 s in its first 2 min, once per 60 s until 30 min, once per 5 min after that
       (count `/check` requests over a simulated hour with `watchOnce` called every tick); a completed check
       still saves and wakes as today; a `/check` error keeps the next-check schedule (no tight retry)
-- [ ] write a failing test: calling `activate` twice on the same process leaves one interval running (the
+- [x] write a failing test: calling `activate` twice on the same process leaves one interval running (the
       first is cleared; assert through a counting fake `setInterval`/`clearInterval` passed in the seam, or the
       process-wide handle slot)
-- [ ] `index.mjs`: `nextCheckAt` map (process-wide, keyed by generation id, dropped on settle/give-up);
+- [x] `index.mjs`: `nextCheckAt` map (process-wide, keyed by generation id, dropped on settle/give-up);
       `watchOnce` skips a row whose `nextCheckAt > now()` and schedules the next check after each `/check`
       from the row's age: `≤2 min → 15 s`, `≤30 min → 60 s`, else `5 min`
-- [ ] `index.mjs` watcher start: handle stored in `globalThis[Symbol.for("bridex.loremax.watcher")]`;
+- [x] `index.mjs` watcher start: handle stored in `globalThis[Symbol.for("bridex.loremax.watcher")]`;
       a new activation clears the stored one first; `ctx.onShutdown` still clears it
-- [ ] run `node --test test/` - must pass before task 4
+- [x] ➕ the schedule counts from the pass's start time, not from each `/check`: a row checked late in a slow
+      pass is still due on the tick its cadence lands on (else 15 s would become 30 s)
+- [x] ⚠️ deviation: `nextCheck` is per activation, not process-wide — only one watcher runs, a fresh activation
+      checking every pending job once is harmless, and a process-wide map keyed by generation id leaked a
+      schedule from one test's `fakeCtx` into the next (same ids); entries are pruned each pass for rows no
+      longer pending (settled by a tool call or the watcher)
+- [x] run `node --test test/` - must pass before task 4
 
 ### Task 4: Verify acceptance criteria
 - [ ] verify the three findings are closed: redirect test, duplicate test, cadence test all green and each one
