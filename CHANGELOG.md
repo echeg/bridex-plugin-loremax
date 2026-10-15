@@ -6,8 +6,8 @@ Fixes for three findings from the review of the catalog PR (nik-devs/bridex-plug
 leaving LoreMax on a redirect, and a watcher that spent the organization's rate limit on polling.
 
 - **No double charge**: a `loremax_generate` call identical to one still being submitted (same workflow or profile
-  tool, same inputs or arguments, same reference files by content and order, same caller — workspace, agent, session
-  and task) is refused before any request:
+  tool, same inputs or arguments, same reference files by content and order, same base URL, profile and API key, same
+  caller — workspace, agent, session and task) is refused before any request:
   `status: "submitting"` with `duplicate_of` naming the running submission and the "do NOT call again" hint. The
   request is free again once LoreMax accepts or refuses the first one. Works on cores without `ctx.jobs` too.
 - **The key stays on LoreMax**: API requests (REST and `/api/mcp`) no longer follow redirects — a 3xx is refused

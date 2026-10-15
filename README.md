@@ -205,8 +205,10 @@ Retry-After sleeps and downloads.
 
 A call identical to one still being submitted — same workflow (or profile
 tool), same `inputs` (or `arguments`), same reference files by content and in
-the same order, from the same caller (workspace, agent, session and task, where
-the wake and the outputs go) — is refused before any request, so an agent that
+the same order, to the same LoreMax (base URL, profile and API key: after a
+settings change another server or organization is another request), from the
+same caller (workspace, agent, session and task, where the wake and the outputs
+go) — is refused before any request, so an agent that
 retries while the first submission is still landing is not charged twice. The
 reply is `status: "submitting"` with `duplicate_of` (the running submission's
 `submit:<uuid>`, an identifier only: `loremax_result` does not take it) and the

@@ -164,8 +164,9 @@
 - [x] README / CHANGELOG / plan: `duplicate_of` is always `submit:<uuid>`, the new errors and health messages
 
 ## Technical Details
-- Submit key: `sha256(JSON.stringify(canonical({ mode, workflow: workflow ?? tool, args, refs, workspace, agent,
-  sessionKey, taskId })))`, hex. Canonical JSON = keys sorted recursively, arrays as given. `refs` keep their order
+- Submit key: `sha256(JSON.stringify(canonical({ mode, workflow: workflow ?? tool, args, refs, target, workspace, agent,
+  sessionKey, taskId })))`, hex; `target = { base, profile, auth: sha256(api key) }` — a call after a settings change
+  to another server, organization or profile is not refused as a duplicate of one still on its way to the old one. Canonical JSON = keys sorted recursively, arrays as given. `refs` keep their order
   (REST sends them as `file_0`, `file_1`, …); profile mode hashes the files named by `canonical(args)`, a file over
   the upload cap by `size:mtime`. The caller is part of the key: the wake and the outputs go to the first caller only.
 - Duplicate reply (both modes): `{ status: "submitting", duplicate_of: "submit:<uuid>", workflow|tool, hint }`; the
@@ -173,8 +174,9 @@
   returns the result".
 - Watcher schedule: `checkEveryMs(ageMs) = ageMs <= 120_000 ? 15_000 : ageMs <= 1_800_000 ? 60_000 : 300_000`;
   `nextCheck.set(id, passAt + checkEveryMs(passAt - createdAt))` before every `/check`, including a failed one.
-- Watcher handle slot: `globalThis[Symbol.for("bridex.loremax.watcher")] = { interval, generations }`; `activate`
-  does `clearInterval(prev.interval)` before `setInterval` and takes `prev.generations` over.
+- Watcher handle slot: `globalThis[Symbol.for("bridex.loremax.watcher")] = { interval, generations, stop }`; `activate`
+  does `clearInterval(prev.interval)` and `prev.stop()` before `setInterval` and takes `prev.generations` over;
+  `stop` (also run on shutdown) ends a pass already running at its next row.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

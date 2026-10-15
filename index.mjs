@@ -21,7 +21,7 @@ import path from "node:path";
  */
 
 const DEFAULT_BASE_URL = "https://loremax.ai";
-/** The process's one result watcher: `{ interval, generations }` of the activation running it. */
+/** The process's one result watcher: `{ interval, generations, stop }` of the activation running it. */
 const WATCHER_SLOT = Symbol.for("bridex.loremax.watcher");
 /** LoreMax asks for Retry-After on 429; never sleep longer than this inside a tool call. */
 const RETRY_AFTER_CAP_S = 30;
@@ -868,14 +868,16 @@ const canonical = (v) =>
   Array.isArray(v) ? v.map(canonical) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v;
 
 /**
- * What a paid request asks for and who gets its result → its key: the same mode,
- * workflow (or profile tool), arguments, reference bytes (in order: they are sent
- * in order) and caller — workspace, agent, session and task, where its wake and
- * outputs go — make the same generation.
+ * What a paid request asks for, where it goes and who gets its result → its key:
+ * the same mode, workflow (or profile tool), arguments, reference bytes (in order:
+ * they are sent in order), destination — base URL, profile path and API key (by
+ * its hash): another server, organization or profile is another generation — and
+ * caller — workspace, agent, session and task, where its wake and outputs go —
+ * make the same generation.
  */
-const submitKey = ({ mode, workflow, args, refs, call }) =>
+const submitKey = ({ mode, workflow, args, refs, target, call }) =>
   sha256(JSON.stringify(canonical({
-    mode, workflow, args, refs,
+    mode, workflow, args, refs, target,
     workspace: call.workspace, agent: call.agent ?? null, sessionKey: call.sessionKey ?? null, taskId: call.taskId ?? null,
   })));
 
@@ -1162,6 +1164,18 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * twice. Process-wide for the same reason as inFlight.
    */
   const submitting = (globalThis[Symbol.for("bridex.loremax.submitting")] ??= new Map());
+  /** Where a submission goes, for submitKey; a setting that is missing or invalid reads as null (the call then fails on it). */
+  const submitTarget = () => {
+    const read = (f) => {
+      try {
+        return f();
+      } catch {
+        return null;
+      }
+    };
+    const k = read(lmx.key);
+    return { base: read(lmx.baseUrl), profile: read(lmx.profilePath), auth: k ? sha256(k) : null };
+  };
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
@@ -1265,7 +1279,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         const note = String(args.note ?? (typeof agentArgs.prompt === "string" ? agentArgs.prompt.slice(0, 120) : ""));
         const base = { args: agentArgs, note };
         // canonical: the same arguments in another key order name their files in the same order
-        const key = submitKey({ mode: "profile", workflow: name, args: agentArgs, refs: await argFileHashes(call.workspace, canonical(agentArgs)), call });
+        const key = submitKey({ mode: "profile", workflow: name, args: agentArgs, refs: await argFileHashes(call.workspace, canonical(agentArgs)), target: submitTarget(), call });
         if (submitting.has(key)) return text(JSON.stringify(duplicateReply(key, { tool: name }), null, 1));
 
         // the whole sequence is the detached unit: a late answer (even a refused upload) still comes as a wake
@@ -1817,7 +1831,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const files = loadReferences(call.workspace, references);
       const note = String(args.note ?? (typeof inputs.prompt === "string" ? inputs.prompt.slice(0, 120) : ""));
       const base = { workflow, inputs, references, note };
-      const key = submitKey({ mode: "rest", workflow, args: inputs, refs: await Promise.all(files.map(sha256File)), call });
+      const key = submitKey({ mode: "rest", workflow, args: inputs, refs: await Promise.all(files.map(sha256File)), target: submitTarget(), call });
       if (submitting.has(key)) return text(JSON.stringify(duplicateReply(key, { workflow }), null, 1));
 
       let init;
@@ -2014,6 +2028,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // run that died mid-wait (restart, crash, wait budget) still gets its
   // outputs saved and the agent woken in the session it came from.
   let watching = false;
+  // false once a newer activation replaced this watcher or it shut down: clearInterval
+  // stops future ticks only, a pass already running stops at its next row
+  let active = true;
   // finished generations whose save failed here: the agent was woken with the error and
   // saves them with loremax_result — not downloaded again every pass (until the 6h give-up)
   const unsaved = new Set();
@@ -2021,7 +2038,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // only one watcher runs, and a fresh one checks every pending job once first
   const nextCheck = new Map();
   async function watchOnce() {
-    if (watching || !ctx.jobs) return;
+    if (watching || !active || !ctx.jobs) return;
     watching = true;
     try {
       // the schedule counts from the pass's start, not from each /check: a later
@@ -2032,6 +2049,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const pendingIds = new Set(rows.map((j) => j.externalId));
       for (const id of nextCheck.keys()) if (!pendingIds.has(id)) nextCheck.delete(id);
       for (const j of rows) {
+        if (!active) break;
         if (inFlight.has(j.externalId)) continue;
         if (unsaved.has(j.externalId) && now() - Date.parse(j.createdAt) <= GIVE_UP_MS) continue;
         if ((nextCheck.get(j.externalId) ?? 0) > passAt) continue;
@@ -2121,14 +2139,17 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   const slot = WATCHER_SLOT;
   if (globalThis[slot]) {
     clearInterval(globalThis[slot].interval);
+    globalThis[slot].stop?.();
     delete globalThis[slot];
   }
   if (ctx.jobs) {
     const watcher = setInterval(watchOnce, WATCH_MS);
     watcher.unref?.();
-    globalThis[slot] = { interval: watcher, generations };
+    const stop = () => (active = false);
+    globalThis[slot] = { interval: watcher, generations, stop };
     ctx.onShutdown?.(() => {
       clearInterval(watcher);
+      stop();
       // a late shutdown of an older instance leaves the current watcher alone
       if (globalThis[slot]?.interval === watcher) delete globalThis[slot];
     });

@@ -1490,6 +1490,37 @@ test("other inputs, another workspace or other reference bytes submit independen
   gate.open();
 });
 
+test("after a settings change, the same call to another server or with another key is not a duplicate", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return { generationId: 501, status: "completed", tokensCost: 2, originalUrls: [`${CDN}/out.png`] };
+    }],
+    ["GET", `${CDN}/out.png`, () => new Response("PNG")],
+  ]);
+  restore = f.restore;
+  const args = { workflow_id: "w", inputs: { prompt: "p" } };
+  const first = s.run(args);
+  await eventually(() => execs(f) === 1, "the first execute");
+  // a settings save re-activates the plugin while the first submission is still on its way
+  const again = async (config) => {
+    const g = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, ...config } });
+    await activate(g.ctx, { pollMs: 1, now: () => s.clock.t, sleep: s.time.sleep });
+    return async (a) => JSON.parse((await g.rec.tools.get("loremax_generate").handler(a, CALL)).content[0].text);
+  };
+  // the same settings: still a duplicate
+  assert.equal((await (await again({}))(args)).duplicate_of, s.placeholders()[0].externalId);
+  const other = (await again({ base_url: "https://lm2.test" }))(args);
+  await eventually(() => f.calls.some((c) => c.url === "https://lm2.test/api/v2/workflow/execute"), "the execute on the new server");
+  const rekeyed = (await again({ api_key: "lmx_prod_other" }))(args);
+  await eventually(() => execs(f) === 3, "the execute with the new key");
+
+  gate.open();
+  for (const r of await Promise.all([first, other, rekeyed])) assert.equal(r.status, "completed");
+});
+
 test("two identical calls at once (parallel tool calls): one execute, the other is refused", async () => {
   const s = await setup();
   const gate = held();

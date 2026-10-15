@@ -380,6 +380,36 @@ test("watcher: a second activation clears the first one's interval, one watcher 
   }
 });
 
+test("watcher: a replaced watcher's pass already running stops at its next row — no second check of a row the new one checked", async () => {
+  const s = await setup();
+  s.track();
+  s.track({ externalId: "502" });
+  let release;
+  const blocked = new Promise((r) => (release = r));
+  const checked = [];
+  const route = (id) => ["POST", `/api/v2/generations/${id}/check`, async () => {
+    checked.push(id);
+    if (id === "501" && checked.length === 1) await blocked;
+    return { status: "pending" };
+  }];
+  const f = mockFetch([route("501"), route("502")]);
+  restore = f.restore;
+  try {
+    const old = s.watchOnce();
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(checked, ["501"]);
+    // a settings save while the old pass waits on 501: the new watcher skips 501 (in flight) and checks 502
+    const again = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+    await again.watchOnce();
+    assert.deepEqual(checked, ["501", "502"]);
+    release();
+    await old;
+    assert.deepEqual(checked, ["501", "502"]);
+  } finally {
+    for (const fn of s.rec.shutdown) fn();
+  }
+});
+
 test("watcher: a re-activation takes the running instance's in-memory jobs over — an older core's row has no params to rebuild them", async () => {
   const s = await setup();
   // an older core: track() keeps no params
