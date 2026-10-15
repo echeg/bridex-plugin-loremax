@@ -146,10 +146,11 @@
 - [x] run the linter if the repo defines one (none today: skipped)
 
 ### Task 5: [Final] Update documentation
-- [ ] `README.md`: https-only base_url/profile_url, the duplicate-submission reply (`duplicate_of`), the watcher
+- [x] `README.md`: https-only base_url/profile_url, the duplicate-submission reply (`duplicate_of`), the watcher
       cadence (15 s / 60 s / 5 min, 6 h give-up) and why
-- [ ] `CHANGELOG.md` + `plugin.yaml` version `0.2.1`, with the three review findings referenced
-- [ ] `plugin.yaml` description of `base_url`: "default https://loremax.ai (https only)"
+- [x] `CHANGELOG.md` + `plugin.yaml` version `0.2.1`, with the three review findings referenced
+- [x] `plugin.yaml` description of `base_url`: "default https://loremax.ai (https only)"
+- [x] ➕ `package.json` version `0.2.1` too, so it matches `plugin.yaml`
 
 ## Technical Details
 - Submit key: `sha256(JSON.stringify({ mode, workflow: workflow ?? tool, args: canonical(agentArgs|inputs),

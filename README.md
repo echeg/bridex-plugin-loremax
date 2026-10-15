@@ -40,6 +40,12 @@ Both are `requires_env`: the host does not start the plugin until both are set,
 and the plugin card shows `needs env: …` until then. Set `LOREMAX_BASE_URL` to
 `https://loremax.ai` even when LoreMax is at its default address.
 
+`base_url` and `profile_url` are **https only**: an `http://` value is a config
+error naming the setting, because the key travels in every request. API requests
+never follow a redirect either — a 3xx from LoreMax is refused ("redirected —
+refused, the key must not leave <host>"), so `X-API-Key` reaches no host but
+`base_url`'s.
+
 Optional `bridex.yaml`:
 
 ```yaml
@@ -47,7 +53,7 @@ plugins:
   loremax:
     config:
       api_key: ${LOREMAX_API_KEY}     # default
-      base_url: ${LOREMAX_BASE_URL}   # default
+      base_url: ${LOREMAX_BASE_URL}   # default; https:// only
       default_wait_s: 45              # how long loremax_generate waits before handing back (10..50; empty or invalid = 45)
       usd_per_token: 0.001            # optional: tokens → USD for the spend charts; absent = tokens only
       profile_url: https://loremax.ai/api/mcp/s/AbCdEfGh12345678   # optional: profile mode (or the bare publicId)
@@ -80,7 +86,7 @@ organization of `LOREMAX_API_KEY`; the plugin calls it with the same key.
 
 With `profile_url` set, the plugin uses only the profile: there is one catalog
 for the agent. An invalid `profile_url` (a foreign origin, a wrong path, not
-http(s)) marks the plugin as needing configuration, and every tool replies with
+https) marks the plugin as needing configuration, and every tool replies with
 the config error; the plugin never falls back to REST mode, because that would
 silently show the agent the whole organization catalog. A profile that LoreMax
 answers with 404 (unknown, disabled, or a key from another organization) fails
@@ -192,6 +198,15 @@ Retry-After sleeps and downloads.
   and the agent is woken with the files, the error, or — when no reply ever
   came — the "may have been charged" text.
 
+A call identical to one still being submitted — same workflow (or profile
+tool), same `inputs` (or `arguments`), same reference files by content, same
+workspace — is refused before any request, so an agent that retries while the
+first submission is still landing is not charged twice. The reply is
+`status: "submitting"` with `duplicate_of` (the running submission's
+`submit:<uuid>` or generation id) and the same "do NOT call loremax_generate
+again" hint. The request is held only while it is being submitted: once
+LoreMax accepts or refuses it, the same call submits again (a new paid run).
+
 A generation that completes with less than ~10 s left, or whose downloads are
 still running at the deadline, is saved in the background and the agent is
 woken with the files. A synchronous result saved this way is tracked under its
@@ -254,16 +269,23 @@ finishes the same generation twice.
 
 `loremax_generate` tracks the generation in the instance DB from the first
 second. If the wait runs out, the agent gets a `generation_id` back and may end
-its turn. A watcher polls every pending generation every 15 s through LoreMax's
-REST status check (in both modes): when it completes, the outputs are saved and
-the agent is **woken** in the session it came from with the file list; when it
-fails, the agent is woken with the error. A server restart mid-wait loses
-neither the generation nor the tokens: the job row keeps the inputs (or the
+its turn. A watcher checks every pending generation through LoreMax's REST
+status check (in both modes), less often as the generation ages: every 15 s
+while it is under 2 min old, every 60 s until 30 min, every 5 min after that.
+LoreMax's limit of 1000 requests an hour is per organization and shared with
+the paid calls, so a few long video generations polled every 15 s would starve
+`loremax_generate` with 429s; most generations finish in the first minutes,
+where the check stays fast. A failed check keeps its schedule (no tight retry).
+There is one watcher per process: a re-activation (settings save, update,
+dashboard toggle) stops the previous one before starting its own. When a
+generation completes, the outputs are saved and the agent is **woken** in the
+session it came from with the file list; when it fails, the agent is woken with
+the error. A server restart mid-wait loses neither the generation nor the tokens: the job row keeps the inputs (or the
 profile tool and arguments), references, token spend and note (as `track()`
 params), so the watcher saves the outputs with full provenance. Older cores keep
 only the label, which carries the token spend (`hero · 12 tk`), so the spend is
 still recorded. Status-check errors (network, rate limit) don't fail the job;
-the watcher keeps retrying. A generation still pending after 6 h is settled as
+the watcher retries on the same schedule. A generation still pending after 6 h is settled as
 failed and the agent is woken to say so.
 
 A submission still waiting for LoreMax's answer is tracked too, as a
