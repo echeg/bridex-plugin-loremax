@@ -138,11 +138,12 @@
 - [x] run `node --test test/` - must pass before task 4
 
 ### Task 4: Verify acceptance criteria
-- [ ] verify the three findings are closed: redirect test, duplicate test, cadence test all green and each one
+- [x] verify the three findings are closed: redirect test, duplicate test, cadence test all green and each one
       was seen failing first (TDD)
-- [ ] verify a `http://` base_url that is the LoreMax default never appears in docs/examples (grep)
-- [ ] run full test suite `node --test test/`
-- [ ] run the linter if the repo defines one (none today: skip)
+- [x] verify a `http://` base_url that is the LoreMax default never appears in docs/examples (grep) — only
+      refusal tests and this plan mention http://
+- [x] run full test suite `node --test test/` (240 pass, 0 fail)
+- [x] run the linter if the repo defines one (none today: skipped)
 
 ### Task 5: [Final] Update documentation
 - [ ] `README.md`: https-only base_url/profile_url, the duplicate-submission reply (`duplicate_of`), the watcher
