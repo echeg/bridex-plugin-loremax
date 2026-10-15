@@ -855,6 +855,17 @@ async function sha256File(abs) {
   return h.digest("hex");
 }
 
+/** Object keys sorted at every level, arrays as given: equal requests give equal JSON. */
+const canonical = (v) =>
+  Array.isArray(v) ? v.map(canonical) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v;
+
+/**
+ * What a paid request asks for → its key: the same mode, workflow (or profile
+ * tool), arguments, reference bytes and workspace make the same generation.
+ */
+const submitKey = ({ mode, workflow, args, refs, workspace }) =>
+  sha256(JSON.stringify(canonical({ mode, workflow, args: args ?? {}, refs: [...refs].sort(), workspace })));
+
 /** fn over items, at most `limit` at a time; the first failure rejects. */
 async function mapLimit(items, limit, fn) {
   let next = 0;
@@ -1130,6 +1141,12 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * (re-imports) the plugin while the old instance's tool calls are still polling.
    */
   const inFlight = (globalThis[Symbol.for("bridex.loremax.inFlight")] ??= new Set());
+  /**
+   * Submissions on their way to LoreMax, by submitKey → the submission's id: an
+   * identical call meanwhile is refused instead of paying for the same generation
+   * twice. Process-wide for the same reason as inFlight.
+   */
+  const submitting = (globalThis[Symbol.for("bridex.loremax.submitting")] ??= new Map());
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
@@ -1223,10 +1240,13 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         for (const k of INJECTED_ARGS) delete agentArgs[k];
         const note = String(args.note ?? (typeof agentArgs.prompt === "string" ? agentArgs.prompt.slice(0, 120) : ""));
         const base = { args: agentArgs, note };
+        const key = submitKey({ mode: "profile", workflow: name, args: agentArgs, refs: await argFileHashes(call.workspace, agentArgs), workspace: call.workspace });
+        if (submitting.has(key)) return text(JSON.stringify(duplicateReply(key, { tool: name }), null, 1));
 
         // the whole sequence is the detached unit: a late answer (even a refused upload) still comes as a wake
-        const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "profile", tool: name, note }) : null;
+        const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "profile", tool: name, note, key }) : null;
         const submission = submitProfile(call, name, agentArgs, ph ? undefined : deadline).catch((error) => ({ error }));
+        if (!ph) holdWhile(key, submission);
         const first = await raceBudget(ph, submission, until);
         if (!first) {
           submission
@@ -1537,7 +1557,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * The placeholder row of a submission in progress: a restart while LoreMax
    * renders a slow request leaves it running, and the next watcher tells the agent.
    */
-  function trackSubmit(call, { mode, workflow, tool, note }) {
+  function trackSubmit(call, { mode, workflow, tool, note, key }) {
     const submitId = `submit:${crypto.randomUUID()}`;
     const trackedId = ctx.jobs.track({
       workspace: call.workspace,
@@ -1551,7 +1571,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       params: { submitting: true, mode, ...(tool != null ? { tool } : { workflow }), note },
     });
     inFlight.add(submitId);
-    return { submitId, trackedId, call, what: `LoreMax ${workflow ?? tool}${note ? ` (${note})` : ""}`, task: call.taskId ? ` (task ${call.taskId})` : "" };
+    submitting.set(key, submitId);
+    return { submitId, key, trackedId, call, what: `LoreMax ${workflow ?? tool}${note ? ` (${note})` : ""}`, task: call.taskId ? ` (task ${call.taskId})` : "" };
   }
 
   function settleSubmit(ph, status, { generationId, error } = {}) {
@@ -1563,7 +1584,53 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       });
     } finally {
       inFlight.delete(ph.submitId);
+      releaseSubmit(ph.key, ph.submitId);
     }
+  }
+
+  /** Frees `key` — only while it is still this submission's. */
+  const releaseSubmit = (key, id) => {
+    if (submitting.get(key) === id) submitting.delete(key);
+  };
+
+  /** A core without job rows has no placeholder to settle: `key` is held until `submission` settles. */
+  function holdWhile(key, submission) {
+    const id = `submit:${crypto.randomUUID()}`;
+    submitting.set(key, id);
+    const release = () => releaseSubmit(key, id);
+    submission.then(release, release);
+  }
+
+  /** The reply to a request identical to one still being submitted: nothing is sent, nothing is charged. */
+  const duplicateReply = (key, what) => ({
+    status: "submitting",
+    duplicate_of: submitting.get(key),
+    ...what,
+    hint: ctx.jobs && ctx.wakeAgent
+      ? "this exact request is already being submitted — do NOT call loremax_generate again; end your turn, you will be WOKEN with the result"
+      : "this exact request is already being submitted — do NOT call loremax_generate again; the call that sent it returns the result",
+  });
+
+  /**
+   * sha256 of every workspace file a profile call's arguments name. Which
+   * arguments are files is known only after the catalog read, so every string
+   * that resolves to a workspace file counts (URLs and other text resolve to none).
+   */
+  async function argFileHashes(ws, v, out = []) {
+    if (typeof v === "string") {
+      if (v.trim() && !/^[a-z][a-z0-9+.-]*:/i.test(v)) {
+        let abs = null;
+        try {
+          abs = outputs.resolveLocal(ws, v);
+        } catch {}
+        if (abs) out.push(await sha256File(abs));
+      }
+    } else if (Array.isArray(v)) {
+      for (const x of v) await argFileHashes(ws, x, out);
+    } else if (isObj(v)) {
+      for (const x of Object.values(v)) await argFileHashes(ws, x, out);
+    }
+    return out;
   }
 
   const wakeSubmit = (ph, prompt) =>
@@ -1722,6 +1789,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const files = loadReferences(call.workspace, references);
       const note = String(args.note ?? (typeof inputs.prompt === "string" ? inputs.prompt.slice(0, 120) : ""));
       const base = { workflow, inputs, references, note };
+      const key = submitKey({ mode: "rest", workflow, args: inputs, refs: await Promise.all(files.map(sha256File)), workspace: call.workspace });
+      if (submitting.has(key)) return text(JSON.stringify(duplicateReply(key, { workflow }), null, 1));
 
       let init;
       if (files.length) {
@@ -1741,8 +1810,9 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
 
       // detached only where a late answer still reaches the agent (a job row that
       // survives a restart, and a wake); older cores block on the submission as before
-      const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "rest", workflow, note }) : null;
+      const ph = ctx.jobs && ctx.wakeAgent ? trackSubmit(call, { mode: "rest", workflow, note, key }) : null;
       const submission = execute(init).then((sub) => ({ sub }), (error) => ({ error }));
+      if (!ph) holdWhile(key, submission);
       const first = await raceBudget(ph, submission, until);
       if (!first) {
         submission.then((o) => settleLate(ph, o, ({ sub }) => accepted(call, sub, base))).catch((e) => ctx.log.warn(`loremax ${ph.submitId}: ${e?.message ?? e}`));

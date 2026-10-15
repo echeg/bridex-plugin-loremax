@@ -14,6 +14,8 @@ const CALL = { workspace: "studio", agent: "illustrator", taskId: "task-9", sess
  * so wait_s runs out without real waiting; time.expire() ends the submission's budget race.
  */
 const setup = async ({ config = {}, tick = 1_000, patch } = {}) => {
+  // submissions in flight are process-wide: a test that leaves one hanging must not refuse the next
+  globalThis[Symbol.for("bridex.loremax.submitting")]?.clear();
   const f = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, ...config } });
   patch?.(f.ctx);
   const clock = { t: 0, tick };
@@ -1351,4 +1353,187 @@ test("older core: uploads that leave under 15 s abort before the paid call; a re
   assert.equal(r.status, "completed");
   assert.equal(s.f.calls.filter((c) => c.method === "PUT").length, puts);
   assert.equal(s.genCalls()[0].arguments.source, "https://cdn.test/a1");
+});
+
+// ---------- duplicate submissions ----------
+
+const execs = (f) => f.calls.filter((c) => c.url.endsWith("/api/v2/workflow/execute")).length;
+
+test("an identical call while the first is being submitted is refused: one execute, duplicate_of names the first", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return { generationId: 501, status: "completed", tokensCost: 2, originalUrls: [`${CDN}/out.png`] };
+    }],
+    ["GET", `${CDN}/out.png`, () => new Response("PNG")],
+  ]);
+  restore = f.restore;
+  const args = { workflow_id: "w", inputs: { prompt: "p", seed: 1, opts: { b: 2, a: 1 } }, note: "hero" };
+  const first = s.run(args);
+  await eventually(() => execs(f) === 1, "the first execute");
+
+  // the same request, its keys in another order and another note: still the same paid generation
+  const dup = await s.run({ workflow_id: "w", inputs: { opts: { a: 1, b: 2 }, seed: 1, prompt: "p" }, note: "again" });
+  assert.equal(dup.status, "submitting");
+  assert.equal(dup.workflow, "w");
+  assert.equal(dup.duplicate_of, s.placeholders()[0].externalId);
+  assert.match(dup.duplicate_of, /^submit:/);
+  assert.match(dup.hint, /already being submitted — do NOT call loremax_generate again/);
+  assert.equal(execs(f), 1);
+  // the refused call tracks nothing
+  assert.equal(s.placeholders().length, 1);
+
+  gate.open();
+  assert.equal((await first).status, "completed");
+  // settled: the same request is a new generation again
+  assert.equal((await s.run(args)).status, "completed");
+  assert.equal(execs(f), 2);
+});
+
+test("a failed submission frees its key at once: the same call submits again", async () => {
+  const s = await setup();
+  const gate = held();
+  let n = 0;
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      if (++n === 1) {
+        await gate.until;
+        return jsonResponse({ error: "bad input" }, 400);
+      }
+      return { generationId: 501, status: "completed", tokensCost: 2, originalUrls: [`${CDN}/out.png`] };
+    }],
+    ["GET", `${CDN}/out.png`, () => new Response("PNG")],
+  ]);
+  restore = f.restore;
+  const args = { workflow_id: "w", inputs: { prompt: "p" } };
+  const first = s.run(args);
+  await eventually(() => execs(f) === 1, "the first execute");
+  assert.equal((await s.run(args)).status, "submitting");
+  assert.equal(execs(f), 1);
+
+  gate.open();
+  await assert.rejects(first, /loremax 400/);
+  assert.equal((await s.run(args)).status, "completed");
+  assert.equal(execs(f), 2);
+});
+
+test("a late failure after submitting frees the key too", async () => {
+  const s = await setup();
+  const gate = held();
+  let n = 0;
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      if (++n === 1) await gate.until;
+      return jsonResponse({ error: "bad input" }, 400);
+    }],
+  ]);
+  restore = f.restore;
+  const args = { workflow_id: "w", inputs: { prompt: "p" } };
+  const replying = s.run(args);
+  await s.time.expire();
+  assert.equal((await replying).status, "submitting");
+  assert.equal((await s.run(args)).duplicate_of, s.placeholders()[0].externalId);
+
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the failure wake");
+  assert.match(s.rec.wakes[0].prompt, /FAILED/);
+  await assert.rejects(s.run(args), /loremax 400/);
+  assert.equal(execs(f), 2);
+});
+
+test("other inputs, another workspace or other reference bytes submit independently", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return EXECUTE;
+    }],
+  ]);
+  restore = f.restore;
+  s.put("ref.png", "A");
+  const calls = [
+    s.run({ workflow_id: "w", inputs: { prompt: "p" } }),
+    s.run({ workflow_id: "w", inputs: { prompt: "q" } }),
+    s.run({ workflow_id: "w2", inputs: { prompt: "p" } }),
+    s.run({ workflow_id: "w", inputs: { prompt: "p" } }, { ...CALL, workspace: "other" }),
+    s.run({ workflow_id: "w", inputs: { prompt: "p" }, references: ["artifacts/ref.png"] }),
+  ];
+  await eventually(() => execs(f) === 5, "five executes");
+  // the same path with other bytes is another request
+  s.put("ref.png", "B");
+  calls.push(s.run({ workflow_id: "w", inputs: { prompt: "p" }, references: ["artifacts/ref.png"] }));
+  await eventually(() => execs(f) === 6, "the sixth execute");
+  // the same bytes again: refused
+  const dup = await s.run({ workflow_id: "w", inputs: { prompt: "p" }, references: ["artifacts/ref.png"] });
+  assert.equal(dup.status, "submitting");
+  assert.ok(dup.duplicate_of);
+  assert.equal(execs(f), 6);
+
+  await eventually(() => s.time.races.length === 6, "six budget races");
+  await s.time.expire();
+  for (const r of await Promise.all(calls)) assert.equal(r.duplicate_of, undefined);
+  gate.open();
+});
+
+test("older core without jobs: an identical call while the first blocks is still refused", async () => {
+  const s = await setup({ patch: (ctx) => { delete ctx.jobs; delete ctx.wakeAgent; } });
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return { generationId: 501, status: "completed", tokensCost: 2, originalUrls: [`${CDN}/out.png`] };
+    }],
+    ["GET", `${CDN}/out.png`, () => new Response("PNG")],
+  ]);
+  restore = f.restore;
+  const args = { workflow_id: "w", inputs: { prompt: "p" } };
+  const first = s.run(args);
+  await eventually(() => execs(f) === 1, "the first execute");
+  const dup = await s.run(args);
+  assert.equal(dup.status, "submitting");
+  assert.match(dup.duplicate_of, /^submit:/);
+  assert.equal(execs(f), 1);
+
+  gate.open();
+  assert.equal((await first).status, "completed");
+  assert.equal((await s.run(args)).status, "completed");
+  assert.equal(execs(f), 2);
+});
+
+test("profile: an identical call while the first is being submitted is refused; other file bytes are another request", async () => {
+  const gate = held();
+  const s = await profileSetup({
+    gen: async () => {
+      await gate.until;
+      return { generationId: 904, status: "completed", tokensCost: 3, originalUrls: [`${CDN}/dup.png`] };
+    },
+    routes: [["GET", `${CDN}/dup.png`, () => new Response("PNG")]],
+  });
+  s.write("src.png", "S");
+  const args = { tool: "masked_edit", arguments: { text: "t", source: "src.png" } };
+  const first = s.run(args);
+  await eventually(() => s.genCalls().length === 1, "the first paid call");
+
+  const dup = await s.run({ ...args, note: "again" });
+  assert.equal(dup.status, "submitting");
+  assert.equal(dup.tool, "masked_edit");
+  assert.equal(dup.duplicate_of, s.placeholders()[0].externalId);
+  assert.match(dup.hint, /already being submitted/);
+  assert.equal(s.genCalls().length, 1);
+
+  // the same argument naming a file with other bytes
+  s.write("src.png", "T");
+  const other = s.run(args);
+  await eventually(() => s.genCalls().length === 2, "the second paid call");
+
+  gate.open();
+  assert.equal((await first).status, "completed");
+  assert.equal((await other).status, "completed");
+  // settled: the same request runs again
+  s.write("src.png", "S");
+  assert.equal((await s.run(args)).status, "completed");
+  assert.equal(s.genCalls().length, 3);
 });

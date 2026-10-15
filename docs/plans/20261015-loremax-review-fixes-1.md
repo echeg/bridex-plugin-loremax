@@ -99,20 +99,22 @@
 - [x] run `node --test test/` - must pass before task 2
 
 ### Task 2: an identical submission in flight is refused, not charged twice
-- [ ] write failing tests in `test/generate.test.mjs` (REST and profile mode): with a `mockFetch` execute route
+- [x] write failing tests in `test/generate.test.mjs` (REST and profile mode): with a `mockFetch` execute route
       that resolves only when the test releases it, two concurrent `loremax_generate` calls with the same
       workflow/tool, arguments and workspace make exactly one execute request; the second call returns
       `status: "submitting"` with `duplicate_of` (the running submission's id) and the hint; after the first
       settles (success or failure) the same request submits again; different arguments, a different workspace
       or a different reference file submit independently
-- [ ] `index.mjs`: `submitKey({ mode, workflow|tool, args|inputs, refs, workspace })` = sha256 of canonical
+- [x] `index.mjs`: `submitKey({ mode, workflow|tool, args|inputs, refs, workspace })` = sha256 of canonical
       JSON (sorted keys; reference files by their sha256 from the upload step, sorted); a process-wide
       `Map<key, submitId>` under `Symbol.for("bridex.loremax.submitting")`
-- [ ] `trackSubmit` records the key (`settleSubmit` and the late-settle paths delete it in `finally`); both
+- [x] `trackSubmit` records the key (`settleSubmit` and the late-settle paths delete it in `finally`); both
       generate handlers look the key up before `trackSubmit` and return the duplicate reply when it is held;
       cores without `ctx.jobs` (no placeholder row) still use the map so the guard does not depend on the core
-- [ ] write a test that a failed submission (execute rejects) frees the key immediately
-- [ ] run `node --test test/` - must pass before task 3
+- [x] write a test that a failed submission (execute rejects) frees the key immediately
+- [x] ➕ profile mode hashes the reference files before `trackSubmit` (the upload step runs after it): every
+      string argument that resolves to a workspace file counts; a late failure after `submitting` frees the key too
+- [x] run `node --test test/` - must pass before task 3
 
 ### Task 3: one watcher per process, polling that slows down with a job's age
 - [ ] write failing tests in `test/result-watcher.test.mjs`: with a controlled `now`, a pending generation is
