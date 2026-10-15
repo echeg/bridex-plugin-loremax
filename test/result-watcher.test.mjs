@@ -304,6 +304,30 @@ test("watcher: a pending generation is checked every 15 s under 2 min, every 60 
   assert.equal(s.rec.wakes.length, 1);
 });
 
+test("watcher: the schedule counts from the pass start — a row checked late in a slow pass is still due on its tick", async () => {
+  const s = await setup();
+  s.track();
+  s.track({ externalId: "502" });
+  const born = s.clock.t;
+  for (const j of s.jobs) j.createdAt = new Date(born).toISOString();
+  const at = { 501: [], 502: [] };
+  const route = (id) => ["POST", `/api/v2/generations/${id}/check`, () => {
+    at[id].push(s.clock.t - born);
+    // the first row's check is slow: 502 is checked 10 s into every pass
+    if (id === "501") s.clock.t += 10_000;
+    return { status: "pending" };
+  }];
+  const f = mockFetch([route("501"), route("502")]);
+  restore = f.restore;
+  for (let t = 0; t <= 60_000; t += 15_000) {
+    s.clock.t = born + t;
+    await s.watchOnce();
+  }
+  assert.deepEqual(at[501], [0, 15_000, 30_000, 45_000, 60_000]);
+  // due 15 s after the pass start, not 15 s after its own check (that would skip every other tick)
+  assert.deepEqual(at[502], [10_000, 25_000, 40_000, 55_000, 70_000]);
+});
+
 test("watcher: a failed /check keeps the schedule, no tight retry", async () => {
   const s = await setup();
   s.track();
@@ -353,6 +377,38 @@ test("watcher: a second activation clears the first one's interval, one watcher 
     assert.ok(cleared.includes(armed[1]));
   } finally {
     Object.assign(globalThis, { setInterval: realSet, clearInterval: realClear });
+  }
+});
+
+test("watcher: a re-activation takes the running instance's in-memory jobs over — an older core's row has no params to rebuild them", async () => {
+  const s = await setup();
+  // an older core: track() keeps no params
+  const track = s.ctx.jobs.track;
+  s.ctx.jobs.track = ({ params, ...input }) => track(input);
+  s.clock.tick = 5_000;
+  const ref = path.join(s.art, "studio-references/ref.png");
+  fs.mkdirSync(path.dirname(ref), { recursive: true });
+  fs.writeFileSync(ref, "REF");
+  let done = false;
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => ({ generationId: 501, tokensCost: 7, async: true })],
+    checkRoute(s, [() => (done ? DONE : { status: "pending" })]),
+    PNG,
+  ]);
+  restore = f.restore;
+  const gen = s.rec.tools.get("loremax_generate");
+  const first = JSON.parse((await gen.handler({ workflow_id: "flux-portrait", inputs: { prompt: "rain" }, references: ["artifacts/studio-references/ref.png"], wait_s: 10 }, CALL)).content[0].text);
+  assert.equal(first.status, "in_progress");
+  try {
+    // a settings save: the host activates again without a shutdown, the old watcher stops
+    const again = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+    done = true;
+    await again.watchOnce();
+    assert.equal(s.jobs.find((j) => j.externalId === "501").status, "succeeded");
+    // the inputs and references of the first instance's call, not just the row's label
+    assert.deepEqual(s.rec.annotate[0].meta.generation.params, { prompt: "rain", image_urls: ["artifacts/studio-references/ref.png"] });
+  } finally {
+    for (const fn of s.rec.shutdown) fn();
   }
 });
 

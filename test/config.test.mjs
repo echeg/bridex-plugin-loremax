@@ -74,6 +74,16 @@ test("key present: activate does not ask for config", async () => {
   assert.deepEqual(rec.needsConfig, []);
 });
 
+test("http:// base_url: needsConfig once at activate (REST, or a full profile_url that reads it)", async () => {
+  restoreEnv = withEnv({ LOREMAX_API_KEY: "lmx_prod_x", LOREMAX_BASE_URL: undefined });
+  for (const profile_url of [undefined, "https://lm.example.com/api/mcp/s/AbCdEfGh12345678"]) {
+    const { ctx, rec } = fakeCtx({ config: { base_url: "http://lm.example.com", ...(profile_url ? { profile_url } : {}) } });
+    await activate(ctx);
+    assert.equal(rec.needsConfig.length, 1, `profile_url ${profile_url}`);
+    assert.match(rec.needsConfig[0], /LOREMAX_BASE_URL must be an https:\/\/ URL/);
+  }
+});
+
 const PID = "AbCdEfGh12345678";
 
 test("profile_url: empty → REST mode, bare publicId and full profile URL → the profile path", () => {

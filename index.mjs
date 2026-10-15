@@ -14,13 +14,15 @@ import path from "node:path";
  *     loremax:
  *       config:
  *         api_key: ${LOREMAX_API_KEY}     # optional; this is the default
- *         base_url: ${LOREMAX_BASE_URL}   # optional; this is the default (the credential must be set: requires_env)
+ *         base_url: ${LOREMAX_BASE_URL}   # optional; this is the default, https:// only (the credential must be set: requires_env)
  *         default_wait_s: 45              # how long loremax_generate waits before handing back (10..50 s)
  *         usd_per_token: 0.001            # optional; tokens → USD for the spend charts
  *         profile_url: https://loremax.ai/api/mcp/s/<publicId>   # optional; a curated MCP profile (or its bare publicId)
  */
 
 const DEFAULT_BASE_URL = "https://loremax.ai";
+/** The process's one result watcher: `{ interval, generations }` of the activation running it. */
+const WATCHER_SLOT = Symbol.for("bridex.loremax.watcher");
 /** LoreMax asks for Retry-After on 429; never sleep longer than this inside a tool call. */
 const RETRY_AFTER_CAP_S = 30;
 const RETRY_AFTER_DEFAULT_S = 5;
@@ -866,11 +868,16 @@ const canonical = (v) =>
   Array.isArray(v) ? v.map(canonical) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v;
 
 /**
- * What a paid request asks for → its key: the same mode, workflow (or profile
- * tool), arguments, reference bytes and workspace make the same generation.
+ * What a paid request asks for and who gets its result → its key: the same mode,
+ * workflow (or profile tool), arguments, reference bytes (in order: they are sent
+ * in order) and caller — workspace, agent, session and task, where its wake and
+ * outputs go — make the same generation.
  */
-const submitKey = ({ mode, workflow, args, refs, workspace }) =>
-  sha256(JSON.stringify(canonical({ mode, workflow, args: args ?? {}, refs: [...refs].sort(), workspace })));
+const submitKey = ({ mode, workflow, args, refs, call }) =>
+  sha256(JSON.stringify(canonical({
+    mode, workflow, args, refs,
+    workspace: call.workspace, agent: call.agent ?? null, sessionKey: call.sessionKey ?? null, taskId: call.taskId ?? null,
+  })));
 
 /** fn over items, at most `limit` at a time; the first failure rejects. */
 async function mapLimit(items, limit, fn) {
@@ -1112,9 +1119,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   /**
    * What finish needs beyond the job row, by LoreMax generation id. Lost on a
    * restart: then rebuilt from the row's track() params, or on older cores from
-   * job.model and job.label only.
+   * job.model and job.label only. A re-activation that replaces the watcher takes
+   * the previous one's map over (see the watcher start): a synchronous result
+   * older cores keep nowhere else must not be lost.
    */
-  const generations = new Map();
+  const generations = globalThis[WATCHER_SLOT]?.generations ?? new Map();
   /** The job a generation id stands for after a restart: from the row's params, else its label. */
   const fromRow = (generationId, row, found) => {
     const p = found?.result?.params;
@@ -1156,6 +1165,14 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // tools still register without a key: each call surfaces the Settings hint,
   // and setting the credential needs no restart
   if (!lmx.hasKey()) ctx.needsConfig("Add the LoreMax API key (Settings → Integrations, LOREMAX_API_KEY).");
+  // an http:// base_url (fine before 0.2.1) refuses every call: say so now, not only in the health check
+  let badBase = null;
+  try {
+    lmx.baseUrl();
+  } catch (e) {
+    badBase = e;
+    ctx.needsConfig(e.message);
+  }
   /**
    * The mode, decided once: profile_url set → profile mode (the profile's curated
    * catalog), else REST mode (every workflow of the organization). An invalid
@@ -1169,7 +1186,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     if (p) profile = { path: p };
   } catch (e) {
     profile = { error: e };
-    ctx.needsConfig(e.message);
+    // a full profile_url reads base_url too: its error is already reported
+    if (e.message !== badBase?.message) ctx.needsConfig(e.message);
   }
   ctx.log.info(
     profile?.error ? `loremax mode: profile (invalid profile_url — tools refuse until it is fixed)`
@@ -1246,7 +1264,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         for (const k of INJECTED_ARGS) delete agentArgs[k];
         const note = String(args.note ?? (typeof agentArgs.prompt === "string" ? agentArgs.prompt.slice(0, 120) : ""));
         const base = { args: agentArgs, note };
-        const key = submitKey({ mode: "profile", workflow: name, args: agentArgs, refs: await argFileHashes(call.workspace, agentArgs), workspace: call.workspace });
+        // canonical: the same arguments in another key order name their files in the same order
+        const key = submitKey({ mode: "profile", workflow: name, args: agentArgs, refs: await argFileHashes(call.workspace, canonical(agentArgs)), call });
         if (submitting.has(key)) return text(JSON.stringify(duplicateReply(key, { tool: name }), null, 1));
 
         // the whole sequence is the detached unit: a late answer (even a refused upload) still comes as a wake
@@ -1621,15 +1640,18 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * sha256 of every workspace file a profile call's arguments name. Which
    * arguments are files is known only after the catalog read, so every string
    * that resolves to a workspace file counts (URLs and other text resolve to none).
+   * A file over the upload cap is refused by the upload step anyway: its size and
+   * mtime stand in for a read of the whole file. An unreadable one counts as none
+   * (the upload step reports it).
    */
   async function argFileHashes(ws, v, out = []) {
     if (typeof v === "string") {
       if (v.trim() && !/^[a-z][a-z0-9+.-]*:/i.test(v)) {
-        let abs = null;
         try {
-          abs = outputs.resolveLocal(ws, v);
+          const abs = outputs.resolveLocal(ws, v);
+          const st = fs.statSync(abs);
+          out.push(st.size > UPLOAD_CAP ? `${st.size}:${st.mtimeMs}` : await sha256File(abs));
         } catch {}
-        if (abs) out.push(await sha256File(abs));
       }
     } else if (Array.isArray(v)) {
       for (const x of v) await argFileHashes(ws, x, out);
@@ -1795,7 +1817,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const files = loadReferences(call.workspace, references);
       const note = String(args.note ?? (typeof inputs.prompt === "string" ? inputs.prompt.slice(0, 120) : ""));
       const base = { workflow, inputs, references, note };
-      const key = submitKey({ mode: "rest", workflow, args: inputs, refs: await Promise.all(files.map(sha256File)), workspace: call.workspace });
+      const key = submitKey({ mode: "rest", workflow, args: inputs, refs: await Promise.all(files.map(sha256File)), call });
       if (submitting.has(key)) return text(JSON.stringify(duplicateReply(key, { workflow }), null, 1));
 
       let init;
@@ -2096,7 +2118,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   // One watcher per process: an update, settings save or dashboard toggle activates
   // the plugin again without always shutting the old instance down, and two watchers
   // would poll every pending job twice. The handle is process-wide for that reason.
-  const slot = Symbol.for("bridex.loremax.watcher");
+  const slot = WATCHER_SLOT;
   if (globalThis[slot]) {
     clearInterval(globalThis[slot].interval);
     delete globalThis[slot];
@@ -2104,7 +2126,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   if (ctx.jobs) {
     const watcher = setInterval(watchOnce, WATCH_MS);
     watcher.unref?.();
-    globalThis[slot] = { interval: watcher };
+    globalThis[slot] = { interval: watcher, generations };
     ctx.onShutdown?.(() => {
       clearInterval(watcher);
       // a late shutdown of an older instance leaves the current watcher alone

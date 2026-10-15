@@ -16,11 +16,12 @@
 - **Chosen approach**:
   - duplicate submission → the second call is refused with a `status: "submitting"`-style reply that names the
     running one (no second paid call); key = sha256 of `mode + workflow/tool + canonical JSON of the agent's
-    arguments/inputs + sorted reference file hashes + workspace`, held from `trackSubmit` until `settleSubmit`
+    arguments/inputs + reference file hashes in order + caller (workspace, agent, session, task)`, held from
+    `trackSubmit` until `settleSubmit`
     (success or failure) in a process-wide map next to `inFlight`;
   - watcher cadence → per-job next-check time with a growing interval: 15 s while a job is under 2 min old,
     60 s under 30 min, 5 min after that (the 6 h give-up stays); the `setInterval` tick stays 15 s but skips jobs
-    whose next-check is in the future; the handle lives in `globalThis[Symbol.for("bridex.loremax.watcher")]`
+    whose next-check is in the future (a per-activation map, see the Task 3 deviation); the handle lives in `globalThis[Symbol.for("bridex.loremax.watcher")]`
     and a new activation clears the previous one before starting its own;
   - redirects → `send()` passes `redirect: "error"`; `baseUrl()` and `profilePath()` accept only `https://`
     (a `http://` value is a config error naming the setting). Result downloads (`:700`) and the upload PUT
@@ -152,15 +153,28 @@
 - [x] `plugin.yaml` description of `base_url`: "default https://loremax.ai (https only)"
 - [x] ➕ `package.json` version `0.2.1` too, so it matches `plugin.yaml`
 
+### Iteration 1: review fixes
+- [x] the duplicate key includes the caller (agent, session, task) and keeps reference order; profile mode hashes
+      files over the upload cap by size and mtime, an unreadable one counts as none
+- [x] a re-activation takes the previous instance's `generations` over; an `http://` base_url raises
+      `needsConfig` at activation
+- [x] tests: parallel identical calls (REST, profile), swapped references and other callers, profile list
+      arguments, profile key release after a refusal and a late failure, pass-start cadence with two rows, the
+      watcher handover, Node's real fetch on a redirect
+- [x] README / CHANGELOG / plan: `duplicate_of` is always `submit:<uuid>`, the new errors and health messages
+
 ## Technical Details
-- Submit key: `sha256(JSON.stringify({ mode, workflow: workflow ?? tool, args: canonical(agentArgs|inputs),
-  refs: sortedRefHashes, workspace }))`, hex. Canonical JSON = keys sorted recursively, arrays as given.
-- Duplicate reply (both modes): `{ status: "submitting", duplicate_of: "<submitId or generation id>", workflow|tool,
-  hint: "this exact request is already being submitted — do NOT call again; end your turn, you will be WOKEN" }`.
-- Watcher schedule: `cadenceMs(ageMs) = ageMs <= 120_000 ? 15_000 : ageMs <= 1_800_000 ? 60_000 : 300_000`;
-  `nextCheckAt.set(id, now() + cadenceMs(now() - createdAt))` after every `/check`, including a failed one.
-- Watcher handle slot: `globalThis[Symbol.for("bridex.loremax.watcher")] = { interval }`; `activate` does
-  `clearInterval(prev?.interval)` before `setInterval`.
+- Submit key: `sha256(JSON.stringify(canonical({ mode, workflow: workflow ?? tool, args, refs, workspace, agent,
+  sessionKey, taskId })))`, hex. Canonical JSON = keys sorted recursively, arrays as given. `refs` keep their order
+  (REST sends them as `file_0`, `file_1`, …); profile mode hashes the files named by `canonical(args)`, a file over
+  the upload cap by `size:mtime`. The caller is part of the key: the wake and the outputs go to the first caller only.
+- Duplicate reply (both modes): `{ status: "submitting", duplicate_of: "submit:<uuid>", workflow|tool, hint }`; the
+  hint says "you will be WOKEN with the result" with `ctx.jobs` + `ctx.wakeAgent`, else "the call that sent it
+  returns the result".
+- Watcher schedule: `checkEveryMs(ageMs) = ageMs <= 120_000 ? 15_000 : ageMs <= 1_800_000 ? 60_000 : 300_000`;
+  `nextCheck.set(id, passAt + checkEveryMs(passAt - createdAt))` before every `/check`, including a failed one.
+- Watcher handle slot: `globalThis[Symbol.for("bridex.loremax.watcher")] = { interval, generations }`; `activate`
+  does `clearInterval(prev.interval)` before `setInterval` and takes `prev.generations` over.
 
 ## Post-Completion
 *Items requiring manual intervention or external systems - no checkboxes, informational only*

@@ -41,7 +41,8 @@ and the plugin card shows `needs env: …` until then. Set `LOREMAX_BASE_URL` to
 `https://loremax.ai` even when LoreMax is at its default address.
 
 `base_url` and `profile_url` are **https only**: an `http://` value is a config
-error naming the setting, because the key travels in every request. API requests
+error naming the setting (raised on the plugin card at activation, and by every
+tool call), because the key travels in every request. API requests
 never follow a redirect either — a 3xx from LoreMax is refused ("redirected —
 refused, the key must not leave <host>"), so `X-API-Key` reaches no host but
 `base_url`'s.
@@ -169,12 +170,16 @@ hint}`:
 
 These are thrown as tool errors instead:
 
-- a config error: an invalid `profile_url`, `PROFILE_NOT_FOUND` (unknown or
+- a config error: a `base_url` / `LOREMAX_BASE_URL` that is not `https://`,
+  an invalid `profile_url`, `PROFILE_NOT_FOUND` (unknown or
   disabled profile, or a key from another organization), or
   `PROFILE_ORGANIZATION_MISMATCH` (the profile belongs to another organization
   than `LOREMAX_API_KEY`);
 - a refused upload, or a call that ran out of time before the paid request
   ("nothing was charged");
+- a redirect from LoreMax ("redirected — refused, the key must not leave
+  <host>"): it is never followed, so the request did not reach the other host —
+  a definite refusal, not a "may have been charged" one;
 - a paid request that got no usable reply (timeout, dropped connection, a
   JSON-RPC error or an unreadable result): the generation may already have been
   charged, so the agent checks LoreMax before running it again.
@@ -199,12 +204,13 @@ Retry-After sleeps and downloads.
   came — the "may have been charged" text.
 
 A call identical to one still being submitted — same workflow (or profile
-tool), same `inputs` (or `arguments`), same reference files by content, same
-workspace — is refused before any request, so an agent that retries while the
-first submission is still landing is not charged twice. The reply is
-`status: "submitting"` with `duplicate_of` (the running submission's
-`submit:<uuid>` or generation id) and the same "do NOT call loremax_generate
-again" hint. The request is held only while it is being submitted: once
+tool), same `inputs` (or `arguments`), same reference files by content and in
+the same order, from the same caller (workspace, agent, session and task, where
+the wake and the outputs go) — is refused before any request, so an agent that
+retries while the first submission is still landing is not charged twice. The
+reply is `status: "submitting"` with `duplicate_of` (the running submission's
+`submit:<uuid>`, an identifier only: `loremax_result` does not take it) and the
+same "do NOT call loremax_generate again" hint. The request is held only while it is being submitted: once
 LoreMax accepts or refuses it, the same call submits again (a new paid run).
 
 A generation that completes with less than ~10 s left, or whose downloads are
@@ -299,7 +305,9 @@ with "balance is empty — top up LoreMax" when the key works but no tokens
 remain). In profile mode it reads the balance through the profile and rereads
 its tool list: "profile reachable, N tools · … tk left", failing when the profile
 has no workflows, when the key works but the tool list cannot be read, on a
-404 profile (with the three causes) or an invalid `profile_url`. The dashboard shows a "LoreMax balance" tile, marked "running
+404 profile (with the three causes), an invalid `profile_url`, a `base_url`
+that is not `https://` (naming the setting), or a redirect from LoreMax
+("redirected — refused, the key must not leave <host>"). The dashboard shows a "LoreMax balance" tile, marked "running
 out" when it is empty or under 10 % of the limit.
 
 ## For the studio

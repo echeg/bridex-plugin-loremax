@@ -1,5 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { createClient } from "../index.mjs";
 import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError } from "./helpers.mjs";
 
@@ -404,12 +405,16 @@ test("mcpCall / rpc: a redirect is refused — the Bearer key never reaches the 
   assert.ok(!f.calls.some((c) => c.url.includes("evil.test")));
 });
 
-test("a redirect is a definite refusal, not a may-have-been-charged transport failure", async () => {
-  const f = mockFetch([["POST", "/api/v2/workflow/execute", redirectAway()]]);
-  restore = f.restore;
-  const err = await client().c.restJson("/api/v2/workflow/execute", { method: "POST", body: "{}" }).catch((e) => e);
-  assert.equal(err.status, 0);
-  assert.notEqual(err.ambiguous, true);
+test("Node's own fetch refuses a redirect with the error send() maps (not only the mock)", async () => {
+  const server = http.createServer((req, res) => res.writeHead(302, { Location: "https://evil.test/steal" }).end());
+  await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+  try {
+    const err = await fetch(`http://127.0.0.1:${server.address().port}/`, { redirect: "error" }).catch((e) => e);
+    assert.ok(err instanceof TypeError);
+    assert.match(err.cause?.message ?? "", /redirect/i);
+  } finally {
+    server.close();
+  }
 });
 
 test("a dropped connection is still the fetch TypeError, not a redirect", async () => {

@@ -1355,6 +1355,18 @@ test("older core: uploads that leave under 15 s abort before the paid call; a re
   assert.equal(s.genCalls()[0].arguments.source, "https://cdn.test/a1");
 });
 
+test("a redirect on the paid request is a definite refusal, not a may-have-been-charged one", async () => {
+  const s = await setup();
+  const f = mockFetch([["POST", "/api/v2/workflow/execute", () => new Response("", { status: 302, headers: { Location: "https://evil.test/" } })]]);
+  restore = f.restore;
+  const err = await s.run({ workflow_id: "w", inputs: { prompt: "p" } }).catch((e) => e);
+  assert.match(err.message, /redirected — refused, the key must not leave lm\.test/);
+  assert.doesNotMatch(err.message, /may have accepted and charged/);
+  assert.notEqual(err.ambiguous, true);
+  assert.equal(f.calls.length, 1);
+  assert.equal(s.gens().length, 0);
+});
+
 // ---------- duplicate submissions ----------
 
 const execs = (f) => f.calls.filter((c) => c.url.endsWith("/api/v2/workflow/execute")).length;
@@ -1478,6 +1490,63 @@ test("other inputs, another workspace or other reference bytes submit independen
   gate.open();
 });
 
+test("two identical calls at once (parallel tool calls): one execute, the other is refused", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return { generationId: 501, status: "completed", tokensCost: 2, originalUrls: [`${CDN}/out.png`] };
+    }],
+    ["GET", `${CDN}/out.png`, () => new Response("PNG")],
+  ]);
+  restore = f.restore;
+  s.put("ref.png", "A");
+  // both hash their reference before the check: the two calls interleave right there
+  const args = { workflow_id: "w", inputs: { prompt: "p" }, references: ["artifacts/ref.png"] };
+  const both = Promise.all([s.run(args), s.run(args)]);
+  await eventually(() => execs(f) === 1, "the first execute");
+  gate.open();
+  const replies = await both;
+  assert.equal(execs(f), 1);
+  assert.equal(replies.filter((r) => r.status === "completed").length, 1);
+  assert.equal(replies.filter((r) => r.status === "submitting" && r.duplicate_of).length, 1);
+});
+
+test("reference order and the caller are part of the request: swapped references, another agent, session or task submit independently", async () => {
+  const s = await setup();
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return EXECUTE;
+    }],
+  ]);
+  restore = f.restore;
+  s.put("a.png", "A");
+  s.put("b.png", "B");
+  const args = { workflow_id: "w", inputs: { prompt: "p" }, references: ["artifacts/a.png", "artifacts/b.png"] };
+  const calls = [
+    s.run(args),
+    // sent as file_0, file_1: subject and style swapped is another generation
+    s.run({ ...args, references: ["artifacts/b.png", "artifacts/a.png"] }),
+    // the wake and the outputs go to the caller: another one gets its own generation
+    s.run(args, { ...CALL, agent: "editor" }),
+    s.run(args, { ...CALL, sessionKey: "sess-2" }),
+    s.run(args, { ...CALL, taskId: "task-10" }),
+  ];
+  await eventually(() => execs(f) === 5, "five executes");
+  const dup = await s.run(args);
+  assert.equal(dup.status, "submitting");
+  assert.ok(dup.duplicate_of);
+  assert.equal(execs(f), 5);
+
+  await eventually(() => s.time.races.length === 5, "five budget races");
+  await s.time.expire();
+  for (const r of await Promise.all(calls)) assert.equal(r.duplicate_of, undefined);
+  gate.open();
+});
+
 test("older core without jobs: an identical call while the first blocks is still refused", async () => {
   const s = await setup({ patch: (ctx) => { delete ctx.jobs; delete ctx.wakeAgent; } });
   const gate = held();
@@ -1534,6 +1603,86 @@ test("profile: an identical call while the first is being submitted is refused; 
   assert.equal((await other).status, "completed");
   // settled: the same request runs again
   s.write("src.png", "S");
+  assert.equal((await s.run(args)).status, "completed");
+  assert.equal(s.genCalls().length, 3);
+});
+
+test("profile: two identical calls at once make one paid call", async () => {
+  const gate = held();
+  const s = await profileSetup({
+    gen: async () => {
+      await gate.until;
+      return { generationId: 905, status: "completed", tokensCost: 3, originalUrls: [`${CDN}/par.png`] };
+    },
+    routes: [["GET", `${CDN}/par.png`, () => new Response("PNG")]],
+  });
+  s.write("src.png", "S");
+  const args = { tool: "masked_edit", arguments: { text: "t", source: "src.png" } };
+  const both = Promise.all([s.run(args), s.run(args)]);
+  await eventually(() => s.genCalls().length === 1, "the paid call");
+  gate.open();
+  const replies = await both;
+  assert.equal(s.genCalls().length, 1);
+  assert.equal(replies.filter((r) => r.status === "completed").length, 1);
+  assert.equal(replies.filter((r) => r.status === "submitting" && r.duplicate_of).length, 1);
+});
+
+test("profile: files in a list count by their bytes; a path outside the workspace is just text", async () => {
+  const gate = held();
+  const s = await profileSetup({
+    gen: async () => {
+      await gate.until;
+      return { generationId: 907, status: "completed", tokensCost: 3, originalUrls: [`${CDN}/list.png`] };
+    },
+    routes: [["GET", `${CDN}/list.png`, () => new Response("PNG")]],
+  });
+  s.write("a.png", "A");
+  s.write("b.png", "B");
+  fs.writeFileSync(path.join(s.ctx.paths.workspaceWorkdir(CALL.workspace), "../outside.png"), "X");
+  const args = { tool: "styled_portrait", arguments: { style: "../outside.png", references: ["a.png", "b.png"] } };
+  const first = s.run(args);
+  await eventually(() => s.genCalls().length === 1, "the first paid call");
+  assert.ok((await s.run(args)).duplicate_of);
+  assert.equal(s.genCalls().length, 1);
+
+  // the list's second file with other bytes: another request
+  s.write("b.png", "C");
+  const other = s.run(args);
+  await eventually(() => s.genCalls().length === 2, "the second paid call");
+  gate.open();
+  assert.equal((await first).status, "completed");
+  assert.equal((await other).status, "completed");
+});
+
+test("profile: a refusal and a late failure free the key — the same call reaches the paid call again", async () => {
+  const gate = held();
+  let n = 0;
+  const s = await profileSetup({
+    gen: async () => {
+      n++;
+      if (n === 1) return refusal("Invalid workflow input", "INVALID_WORKFLOW_INPUT", { issues: [] });
+      if (n === 2) {
+        await gate.until;
+        return refusal("Invalid workflow input", "INVALID_WORKFLOW_INPUT", { issues: [] });
+      }
+      return { generationId: 908, status: "completed", tokensCost: 3, originalUrls: [`${CDN}/again.png`] };
+    },
+    routes: [["GET", `${CDN}/again.png`, () => new Response("PNG")]],
+  });
+  s.write("src.png", "S");
+  const args = { tool: "masked_edit", arguments: { text: "t", source: "src.png" } };
+  assert.equal((await s.run(args)).status, "rejected");
+
+  // freed: the second call reaches the paid call, and its answer comes late
+  const replying = s.run(args);
+  await eventually(() => s.genCalls().length === 2, "the second paid call");
+  await s.time.expire();
+  assert.equal((await replying).status, "submitting");
+  assert.ok((await s.run(args)).duplicate_of);
+  assert.equal(s.genCalls().length, 2);
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the late refusal's wake");
+
   assert.equal((await s.run(args)).status, "completed");
   assert.equal(s.genCalls().length, 3);
 });
