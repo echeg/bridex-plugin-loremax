@@ -137,21 +137,21 @@
 ## Implementation Steps
 
 ### Task 1: The guide module and its matching helpers
-- [ ] create `guide.mjs` exporting `GUIDE = { rules, workflows, routes }` with the model-agnostic `rules` from
+- [x] create `guide.mjs` exporting `GUIDE = { rules, workflows, routes }` with the model-agnostic `rules` from
   Technical Details and empty `workflows` / `routes` (filled in Task 7); a header comment states the format, the
   key rule (`visual_id`, else `id:<n>`) and the update flow
-- [ ] add `.gitignore` with `docs/catalog/` (the catalog export is never committed)
-- [ ] add pure helpers in `index.mjs`: `guideKey({ visualId, workflowId })`, `guideEntry(guide, identity)` (by
+- [x] add `.gitignore` with `docs/catalog/` (the catalog export is never committed)
+- [x] add pure helpers in `index.mjs`: `guideKey({ visualId, workflowId })`, `guideEntry(guide, identity)` (by
   visual id, then `id:<n>`), and `recommendedFrom(guide, items, query)` that maps routes to the live items they
   pick (in `pick` order, routes with no live pick dropped, an optional query over task, title, visual id and
   category)
-- [ ] let `activate(ctx, { guide })` override the shipped guide (default `GUIDE`)
-- [ ] create `test/guide.test.mjs`: shipped-guide integrity (every `routes[].pick` key exists in `workflows`; every
+- [x] let `activate(ctx, { guide })` override the shipped guide (default `GUIDE`)
+- [x] create `test/guide.test.mjs`: shipped-guide integrity (every `routes[].pick` key exists in `workflows`; every
   entry has a non-empty `use_for`; every key is a non-empty visual id or `id:<n>`; when the export file exists at
   `$LOREMAX_CATALOG_EXPORT` or `docs/catalog/loremax-workflows.json`, every key exists in it — skipped otherwise)
-- [ ] write tests for the helpers: key fallback, visual id beats numeric id, dead picks and dead routes dropped,
+- [x] write tests for the helpers: key fallback, visual id beats numeric id, dead picks and dead routes dropped,
   pick order kept, query filtering (by task and by item), an empty guide gives `[]`
-- [ ] run tests - must pass before task 2
+- [x] run tests - must pass before task 2
 
 ### Task 2: REST mode — `recommended`, `rules` and `guide` in `loremax_workflows`
 - [ ] list (no `workflow_id`): reply `{ recommended, rules, workflows, hint }` with `recommended` first; items

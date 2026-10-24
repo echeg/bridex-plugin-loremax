@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { GUIDE } from "./guide.mjs";
 
 /**
  * LoreMax plugin: image, video, audio, 3D and text generation through the
@@ -552,6 +553,56 @@ function profileDetails(t) {
   // the schema as it is indented inside the reply; everything before it is short, so the tail is what a cut can reach
   const n = Math.max(REPLY_CAP, JSON.stringify({ schema: t.agentSchema }, null, 1).length + 2048);
   return s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s;
+}
+
+/** A workflow's key in the guide: its visual id, else `id:<numeric id>`; null without either. */
+export function guideKey({ visualId, workflowId } = {}) {
+  const v = typeof visualId === "string" ? visualId.trim() : "";
+  if (v) return v;
+  const n = typeof workflowId === "string" && /^\d+$/.test(workflowId.trim()) ? Number(workflowId) : workflowId;
+  return Number.isSafeInteger(n) && n >= 0 ? `id:${n}` : null;
+}
+
+/** Every key a workflow may be filed under, in lookup order: visual id, then `id:<n>`. */
+const guideKeys = ({ visualId, workflowId } = {}) => [guideKey({ visualId }), guideKey({ workflowId })].filter(Boolean);
+
+/** The guide's entry for a workflow `{ visualId, workflowId }`: by visual id, then by `id:<n>`; null when none. */
+export function guideEntry(guide, identity) {
+  const entries = isObj(guide?.workflows) ? guide.workflows : {};
+  // own keys only: a visual id such as "constructor" must not find Object.prototype's
+  const k = guideKeys(identity).find((k) => Object.hasOwn(entries, k) && isObj(entries[k]));
+  return k ? entries[k] : null;
+}
+
+/**
+ * The guide's routes over the live catalog: `items` are `{ visualId, workflowId,
+ * title, category, … }` (a REST workflow or a profile tool's identity) and come
+ * back as they are, in each route's `pick` order (an item bound under two picked
+ * keys counts once). A pick the catalog lacks is skipped, a route left with no
+ * pick is dropped. `query` keeps a route whose task matches it whole, and from the
+ * others only the items whose title, visual id or category match.
+ * → [{ task, picks: [{ item, entry }] }]
+ */
+export function recommendedFrom(guide, items, query) {
+  const byKey = new Map();
+  for (const item of items ?? []) for (const k of guideKeys(item)) byKey.set(k, [...(byKey.get(k) ?? []), item]);
+  const q = String(query ?? "").trim().toLowerCase();
+  const matches = (v) => String(v ?? "").toLowerCase().includes(q);
+  const out = [];
+  for (const r of Array.isArray(guide?.routes) ? guide.routes : []) {
+    if (!isObj(r) || typeof r.task !== "string" || !Array.isArray(r.pick)) continue;
+    const wholeRoute = !q || matches(r.task);
+    const picks = [];
+    for (const k of r.pick) {
+      for (const item of byKey.get(k) ?? []) {
+        if (picks.some((p) => p.item === item)) continue;
+        if (!wholeRoute && ![item.title, item.visualId, item.category].some(matches)) continue;
+        picks.push({ item, entry: guideEntry(guide, item) });
+      }
+    }
+    if (picks.length) out.push({ task: r.task, picks });
+  }
+  return out;
 }
 
 /**
@@ -1116,7 +1167,7 @@ function savedList(done) {
 const isSubmitRow = (externalId) => String(externalId ?? "").startsWith("submit:");
 
 /** `opts` is for tests only (the host passes just ctx): poll interval, clock and sleep. */
-export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, sleep = realSleep } = {}) {
+export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, sleep = realSleep, guide = GUIDE } = {}) {
   const lmx = createClient(ctx, { now, sleep });
   const outputs = createOutputs(ctx, lmx);
   /**
