@@ -15,6 +15,10 @@ The plugin works in one of two modes, chosen by `profile_url`:
   LoreMax manager curated into an MCP profile, each with an exact typed
   argument schema, and LoreMax validates the arguments before it charges.
 
+In both modes the workflow list comes with a routing guide — which workflow for
+which task, plus rules of thumb — limited to the workflows the agent can
+actually run (see [The routing guide](#the-routing-guide)).
+
 ## Requirements
 
 Node ≥ 20 (built-in `fetch`, `FormData`, `Blob`, `node:test`; no dependencies).
@@ -58,11 +62,12 @@ plugins:
       default_wait_s: 45              # how long loremax_generate waits before handing back (10..50; empty or invalid = 45)
       usd_per_token: 0.001            # optional: tokens → USD for the spend charts; absent = tokens only
       profile_url: https://loremax.ai/api/mcp/s/AbCdEfGh12345678   # optional: profile mode (or the bare publicId)
+      allow_profile_edit: false       # optional, profile mode only: agents get loremax_profile_edit (default false)
 ```
 
 ## Profile mode
 
-A LoreMax **MCP profile** is a named set of 1–10 published workflows of one
+A LoreMax **MCP profile** is a named set of 1–25 published workflows of one
 organization, curated by a LoreMax manager. LoreMax serves it as an MCP endpoint
 at `https://<LoreMax>/api/mcp/s/<publicId>`, where every workflow is a tool with
 an exact JSON Schema for its arguments: types, bounds, defaults, required
@@ -104,13 +109,15 @@ Camera) need REST mode.
 ## Tools
 
 The plugin always registers the same three tools, so agent prompts do not
-change between modes; their arguments and descriptions do.
+change between modes; their arguments and descriptions do. Profile mode adds an
+optional fourth, `loremax_profile_edit`, only with `allow_profile_edit: true`
+(see [Editing the profile's texts](#editing-the-profiles-texts)).
 
 REST mode:
 
 | Tool | Cost | What |
 |---|---|---|
-| `loremax_workflows` | free | without `workflow_id`: the organization's workflows (id, visual id, title, category), optionally filtered by `query`. With `workflow_id`: its input fields (keys, types, options), usage hint and price in tokens |
+| `loremax_workflows` | free | without `workflow_id`: `recommended` (the guide's best live workflows per task), the guide's `rules`, then the organization's workflows (id, visual id, title, category), optionally filtered by `query`. With `workflow_id`: its input fields (keys, types, options), usage hint, price in tokens and the guide's entry for it (`guide`) when there is one |
 | `loremax_generate` | **paid** | run a workflow (`workflow_id` numeric or visual id) with `inputs` exactly as the fields name them and up to 20 `references` (`artifacts/…` or workspace files, ≤ 20 MB each, sent as files); wait `wait_s` (10–50 s, default `default_wait_s` = 45), download the outputs into `artifacts/<task>/`, record the spend. `note` (≤ 200 chars) is a provenance note; it defaults to the first 120 chars of `inputs.prompt` |
 | `loremax_result` | free | status / result of a `generation_id` that outlived the wait, from this workspace only; optional `wait_s` (0–50 s, default 0 = one check). Saves outputs the same way, returns the saved paths when the generation already finished, or `status: failed` with LoreMax's error |
 
@@ -118,13 +125,119 @@ Profile mode:
 
 | Tool | Cost | What |
 |---|---|---|
-| `loremax_workflows` | free | without `tool`: the profile's workflows (tool, title, category, a short description, required arguments, file arguments), optionally filtered by `query` over tool, title, category and visual id. With `tool`: its full argument schema (JSON Schema, never truncated), file arguments, media limits and how to call it |
+| `loremax_workflows` | free | without `tool`: the studio's `instructions`, `recommended` (the guide's best profile tools per task), the guide's `rules`, then the profile's workflows (tool, title, category, a short description, the guide's `use_for`, required arguments, file arguments), optionally filtered by `query` over tool, title, category and visual id. With `tool`: its full description, the guide's entry for it (`guide`), its full argument schema (JSON Schema, never truncated), file arguments, media limits and how to call it |
 | `loremax_generate` | **paid** | run a profile tool: `tool` and `arguments` exactly as its schema names them; file arguments take workspace paths, which the plugin uploads. `wait_s` and `note` as in REST mode. The plugin adds `schema_revision` and `on_behalf_of` (`bridex:<workspace>:<agent>`); the agent never sends them or an `api_key` |
 | `loremax_result` | free | as in REST mode |
+| `loremax_profile_edit` | free | only with `allow_profile_edit: true`: preview, then save, new texts for the profile's description and its tools' descriptions in LoreMax |
 
 A 402 / "Insufficient tokens" from LoreMax raises one out-of-funds card in the
 inbox. A 429 is retried once after `Retry-After` (capped at 30 s, and never
 past the call's deadline); LoreMax allows 60 runs a minute and 1000 an hour.
+
+## The routing guide
+
+The plugin ships a curated guide, `guide.mjs` — the loremax counterpart of the
+media plugin's `media-generation` wiki page:
+
+- `rules`: model-agnostic rules of thumb (read the inputs before a paid call,
+  one base character card varied through references, aspect ratio by placement,
+  transparent backgrounds for game assets, preview cheap then commit, one take
+  per video scene, look at the result, cheap or draft only when asked);
+- `workflows`: per workflow, keyed by its visual id (else `id:<n>`), `use_for`
+  (one line), `knobs` (the inputs that matter) and `caveats` (what goes wrong);
+- `routes`: tasks (a game asset with transparency, key art, a base character
+  card, an edit, an upscale, a video from a first frame, …), each with the
+  workflows to pick, best first.
+
+The guide is always intersected with the live catalog: an entry whose workflow
+the organization (or the profile) lacks is never shown, and a task with no live
+pick is left out, so the agent never sees a workflow it cannot run.
+
+What the agent sees in `loremax_workflows`:
+
+| | List | Details |
+|---|---|---|
+| REST mode | `recommended: [{ task, workflows: [{ id, visual_id, title, why }] }]`, `rules`, `workflows`, `hint` | `guide: { use_for, knobs, caveats }` next to the input fields and price |
+| Profile mode | `instructions`, `recommended: [{ task, tools: [{ tool, title, why }] }]`, `rules`, `tools` (each with `use_for` when the guide knows it), `hint` | `guide` next to the tool's own description and schema |
+
+`recommended` and `rules` come before the list, so a long list is cut, never
+them. With a `query`, `recommended` is filtered by it and `rules` is left out.
+An empty `recommended` is left out too.
+
+In profile mode, `instructions` is the profile's description as the LoreMax
+manager wrote it: the plugin reads it from the profile's `initialize` reply,
+only when the agent lists the tools, and caches it for 10 minutes. LoreMax's
+standard operating lines that follow it (polling, resubmitting, `api_key`, media
+URLs — the plugin already does what they say) are dropped. When `initialize`
+fails, `instructions` is `null` for that call and the list still works.
+
+**Precedence**: the studio's instructions and each profile tool's own
+description override the generic guide (`recommended`, `rules`, `use_for`,
+`guide`) wherever they disagree; the list's hint says so. The guide is shown
+alongside a tool's description, never instead of it. When a details reply would
+go over its size cap, `guide` is dropped first; the schema is never cut.
+
+**Updating the guide**: produce the catalog export (public fields of the
+workflows available to all organizations, from a read-only script in the private
+LoreMax repository) at `docs/catalog/loremax-workflows.json`, or point
+`LOREMAX_CATALOG_EXPORT` at it; the path is git-ignored and never committed.
+Compare it against `guide.mjs`, update the entries and routes, run `npm test`
+(the guide test then checks every key against the export) and release. Cheap or
+draft workflows are never a route's first pick; no organization-specific names,
+provider URLs, prices or internal settings go into `guide.mjs` — this
+repository is public. Until an export exists the shipped guide carries only the
+`rules`, and `recommended` is left out of every reply.
+
+## Editing the profile's texts
+
+With `allow_profile_edit: true` (default `false`), profile mode registers
+`loremax_profile_edit`. In REST mode, or with the flag off, the tool does not
+exist. It writes into LoreMax, so the new texts reach **every client of the
+profile**, not only Bridex.
+
+It edits texts only: the profile's description (what the agent sees as
+`instructions`) and the descriptions of tools already bound to it — never which
+workflows are bound, the tool names or whether the profile is active.
+
+```json
+{ "instructions": "Studio rules for the art team…",
+  "tools": [{ "tool": "styled_portrait", "description": "Our default for character cards…" }],
+  "apply": false }
+```
+
+`instructions` omitted keeps the description; `null` or `""` clears it, and the
+same goes for a tool's `description`. Tools are named by their current names as
+`loremax_workflows` lists them.
+
+1. **Preview** (`apply: false`, the default): nothing is saved. The reply is
+   `{ applied: false, changes: [{ field, before, after }], incompatible, hint }`
+   (`field` is `description` or `tool:<name>`), checked by LoreMax's own
+   preview. A non-empty `incompatible` means LoreMax would refuse the save.
+2. **Apply** (`apply: true`): the plugin rereads the profile right before
+   saving, so the changes are recomputed against what LoreMax holds now, and
+   saves it. The reply is `{ applied: true, changes, hint }`; the plugin then
+   rereads the tool list and the instructions on the next call.
+
+Refused before anything is saved:
+
+- nothing to change requested, or a text over 2000 characters;
+- a tool name that is not bound to the profile (the error lists the bound
+  ones);
+- a field that would be sent back unchanged but contains `[redacted]`: LoreMax
+  hides URL query strings when the profile is read, and saving would overwrite
+  the real text, so a person must fix it in LoreMax → Organization → MCP;
+- a profile that binds a workflow LoreMax marks incompatible.
+
+The texts already in place are reported as "nothing to change", with no save.
+LoreMax's own refusals (400, with its issues and incompatible workflows) and an
+unknown profile (404) come back as tool errors; a save that gets no reply may or
+may not have been stored, so the agent previews again to see.
+
+The plugin finds the profile's management id by its publicId in the
+organization's profile list (cached), and every request costs one unit of the
+key's rate limit. LoreMax has no version check on a save: a manager's edit that
+lands between the plugin's reread and its save is lost. Editing the same profile
+from LoreMax and from an agent at the same time is best avoided.
 
 ## File arguments (profile mode)
 
@@ -319,7 +432,9 @@ out" when it is empty or under 10 % of the limit.
   `studio/art-guide.md` wiki page, which people edit and the illustrator reads
   before every picture — not in this plugin's config. With a profile, the page
   names the profile's tool names (as `loremax_workflows` lists them) instead of
-  workflow ids.
+  workflow ids. The plugin's routing guide is a generic starting point; with a
+  profile, the profile's description and tool descriptions, written in LoreMax,
+  reach the agent too and override it.
 - References come from `artifacts/studio-references/`; they are stored in
   `params.image_urls`, so the studio's Source card shows their thumbnails with
   no UI change.

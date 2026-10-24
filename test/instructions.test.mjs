@@ -58,9 +58,11 @@ test("instructions: one initialize on the profile path with Bearer, protocol 202
   assert.deepEqual(req.json.params.clientInfo, { name: "bridex-plugin-loremax", version: PLUGIN_VERSION });
 });
 
-test("instructions: PLUGIN_VERSION follows package.json", () => {
+test("instructions: PLUGIN_VERSION follows package.json and plugin.yaml", () => {
   const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(PLUGIN_VERSION, pkg.version);
+  const manifest = fs.readFileSync(new URL("../plugin.yaml", import.meta.url), "utf8");
+  assert.equal(manifest.match(/^version:\s*(\S+)\s*$/m)?.[1], PLUGIN_VERSION);
 });
 
 test("instructions: cached for the catalog TTL (10 min), then reread", async () => {

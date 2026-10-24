@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 — 2026-10-24
+
+A routing guide in `loremax_workflows`, the studio's profile instructions, and an opt-in tool that edits the profile's
+texts.
+
+- **Routing guide**: `guide.mjs` ships with the plugin — model-agnostic `rules`, per-workflow `use_for` / `knobs` /
+  `caveats`, and `routes` (tasks with their workflows, best first). It is always intersected with the live catalog,
+  so an agent never sees a workflow its organization or profile lacks. REST `loremax_workflows` lists `recommended`
+  (the best live workflows per task) and `rules` before the workflows, and a workflow's details carry `guide`. With a
+  `query`, `recommended` is filtered by it and `rules` is left out. The shipped guide carries only the `rules` for
+  now: its workflows and routes are filled from a catalog export (see README → The routing guide).
+- **Profile instructions**: in profile mode the list carries `instructions` — the profile's description, read through
+  `initialize` only when the agent lists the tools, cached for 10 minutes, with LoreMax's standard operating lines
+  dropped; `null` when `initialize` fails, with the list intact. The list also carries `recommended` by profile tool
+  names, `rules` and a per-tool `use_for`; a tool's details carry `guide`, dropped first when the reply is over its
+  cap (the schema is still never cut). The studio's instructions and the tools' own descriptions take precedence over
+  the guide, and the hint says so.
+- **`loremax_profile_edit`**: with the new `allow_profile_edit` config (default `false`), profile mode registers a
+  fourth tool that rewrites the profile's description and its bound tools' descriptions in LoreMax — for every
+  client of the profile — never bindings, tool names or activation. `apply: false` (default) previews through
+  LoreMax and returns `changes: [{ field, before, after }]`; `apply: true` rereads the profile and saves. It refuses,
+  before saving, an unknown tool name, a text over 2000 characters, an unchanged text holding `[redacted]` and a
+  profile with incompatible workflows. After a save the tool list and the instructions are reread.
+- Generation, uploads, results, the watcher and the health check make the same requests as in 0.2.1.
+
+Upgrading from 0.2.1: nothing to change. Agent prompts may start from `recommended`; set `allow_profile_edit: true`
+only where agents should be able to rewrite the profile's texts for all its clients.
+
 ## 0.2.1 — 2026-10-15
 
 Fixes for three findings from the review of the catalog PR (nik-devs/bridex-plugins#1): a double charge, the key

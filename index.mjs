@@ -11,6 +11,13 @@ import { GUIDE } from "./guide.mjs";
  * The key is the managed LOREMAX_API_KEY credential (Settings → Integrations),
  * read per call so it can be set without a restart.
  *
+ * loremax_workflows also carries the routing guide (guide.mjs: rules of thumb,
+ * which workflow for which task), always intersected with the live catalog; in
+ * profile mode the studio's own instructions and tool descriptions take
+ * precedence over it. With allow_profile_edit, profile mode adds a fourth tool,
+ * loremax_profile_edit: it rewrites the profile's texts in LoreMax (never its
+ * bindings), previewing before it saves.
+ *
  *   plugins:
  *     loremax:
  *       config:
@@ -19,6 +26,7 @@ import { GUIDE } from "./guide.mjs";
  *         default_wait_s: 45              # how long loremax_generate waits before handing back (10..50 s)
  *         usd_per_token: 0.001            # optional; tokens → USD for the spend charts
  *         profile_url: https://loremax.ai/api/mcp/s/<publicId>   # optional; a curated MCP profile (or its bare publicId)
+ *         allow_profile_edit: false       # optional; profile mode only: agents may rewrite the profile's texts
  */
 
 const DEFAULT_BASE_URL = "https://loremax.ai";
@@ -74,7 +82,7 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
 /** Sent as clientInfo in the profile's initialize; kept equal to package.json's version (a test checks). */
-export const PLUGIN_VERSION = "0.2.1";
+export const PLUGIN_VERSION = "0.3.0";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /**
  * LoreMax appends its standard raw-MCP operating rules to a profile's

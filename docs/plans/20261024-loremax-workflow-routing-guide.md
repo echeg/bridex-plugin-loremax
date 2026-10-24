@@ -271,11 +271,12 @@ then the shipped guide carries only `rules` and `recommended` is omitted from ev
   `allow_profile_edit: true`)
 
 ### Task 9: [Final] Update documentation
-- [ ] `README.md`: the guide (what the agent sees in each mode, the precedence rule, how to update it from an
+- [x] `README.md`: the guide (what the agent sees in each mode, the precedence rule, how to update it from an
   export), profile size 1–25, "three tools plus an optional fourth", `allow_profile_edit` and
   `loremax_profile_edit` (texts only, preview → apply, the refusals, the concurrent-edit caveat), the config block
-- [ ] `CHANGELOG.md`: 0.3.0 entry; bump `version` in `plugin.yaml`, `package.json` and `PLUGIN_VERSION` in `index.mjs` to 0.3.0
-- [ ] `index.mjs` header comment: the guide and the edit tool
+- [x] `CHANGELOG.md`: 0.3.0 entry; bump `version` in `plugin.yaml`, `package.json` and `PLUGIN_VERSION` in `index.mjs` to 0.3.0
+  (➕ the version test also keeps `plugin.yaml` equal to `PLUGIN_VERSION`)
+- [x] `index.mjs` header comment: the guide and the edit tool
 
 ## Technical Details
 - **Guide format** (`guide.mjs`):
