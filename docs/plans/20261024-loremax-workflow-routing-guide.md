@@ -182,19 +182,21 @@
 - [x] run tests - must pass before task 4
 
 ### Task 4: Profile mode — `instructions`, `recommended`, `use_for` and `guide` in `loremax_workflows`
-- [ ] profile list: reply `{ instructions, recommended, rules, tools, hint }`; `recommended` built by
+- [x] profile list: reply `{ instructions, recommended, rules, tools, hint }`; `recommended` built by
   `recommendedFrom` over the profile's generation tools (identity from `_meta`), items `{ tool, title, why }`;
   each `tools[]` row gets `use_for` when matched; the 200-char description cut stays
-- [ ] the hint states the precedence: the studio's instructions and the tools' own descriptions override `guide`
+- [x] the hint states the precedence: the studio's instructions and the tools' own descriptions override `guide`
   and `recommended`; with `query`, `rules` omitted and `recommended` filtered as in REST mode
-- [ ] profile details: add `guide` when matched; in `profileDetails`, the over-cap path drops `guide` before
+- [x] profile details: add `guide` when matched; in `profileDetails`, the over-cap path drops `guide` before
   shrinking the description (the schema is never cut)
-- [ ] fix the `:454` comment (a profile holds up to 25 tools)
-- [ ] write tests (with the fixture's `masked-edit` / `styled-portrait` / `id:1` identities and an injected guide):
+- [x] fix the `:454` comment (a profile holds up to 25 tools)
+- [x] ➕ wire `createProfileInstructions` into `activate` (Task 3 only defined it); the list reads the catalog and the instructions in parallel
+- [x] ➕ `recommendedFrom`'s query also matches a profile item's tool name, like the profile list's own filter
+- [x] write tests (with the fixture's `masked-edit` / `styled-portrait` / `id:1` identities and an injected guide):
   list carries instructions, recommended by tool names, `use_for`, the precedence hint; a tool without `_meta` gets
   no `use_for`; details carry `guide`; an over-cap schema drops `guide` and keeps the schema whole; `initialize`
   failure → `instructions: null` with the list intact
-- [ ] run tests - must pass before task 5
+- [x] run tests - must pass before task 5
 
 ### Task 5: `allow_profile_edit` and the profile's management id
 - [ ] add `allow_profile_edit` (boolean, default false, title and description saying it lets agents rewrite the

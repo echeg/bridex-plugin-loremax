@@ -313,20 +313,30 @@ test("guide details: no guide key when the workflow has no entry", async () => {
 const PROFILE = "AbCdEfGh12345678";
 const FIXTURE = JSON.parse(fs.readFileSync(new URL("./fixtures/profile-tools-list.json", import.meta.url), "utf8"));
 
-/** loremax_workflows in profile mode; the profile answers tools/list with `tools()` (re-read per request). */
-async function profileTool(tools = () => structuredClone(FIXTURE.result.tools)) {
+/**
+ * loremax_workflows in profile mode; the profile answers tools/list with `tools()` (re-read per
+ * request) and initialize with `init(req)` when given (a Response, or the JSON-RPC result).
+ */
+async function profileTool(tools = () => structuredClone(FIXTURE.result.tools), { guide, init } = {}) {
   const f = mockFetch([[
     "POST",
     `/api/mcp/s/${PROFILE}`,
-    (req) => jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: { tools: tools() } }),
+    async (req) => {
+      if (init && req.json.method === "initialize") {
+        const out = await init(req);
+        return out instanceof Response ? out : jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: out });
+      }
+      return jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: { tools: tools() } });
+    },
   ]]);
   restore = f.restore;
   const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, profile_url: PROFILE } });
-  await activate(ctx);
+  await activate(ctx, guide ? { guide } : {});
   const t = rec.tools.get("loremax_workflows");
   const raw = async (args) => (await t.handler(args, {})).content[0].text;
   const lists = () => f.calls.filter((c) => c.json?.method === "tools/list").length;
-  return { t, raw, run: async (args) => JSON.parse(await raw(args)), f, rec, lists };
+  const inits = () => f.calls.filter((c) => c.json?.method === "initialize").length;
+  return { t, raw, run: async (args) => JSON.parse(await raw(args)), f, rec, lists, inits };
 }
 
 test("profile: registered with {tool, query} and a curated, free, price-less description", async () => {
@@ -417,12 +427,18 @@ test("profile details: a tool added since the last read is found by the refresh"
   assert.equal(lists(), 2);
 });
 
-/** A generation tool whose schema JSON is about `kb` KB, with a long description. */
-const bigTool = (kb, description = "d".repeat(4000)) => {
+/** A generation tool whose schema JSON is about `kb` KB, with a long description (and `_meta` visual id "big-tool" with `meta`). */
+const bigTool = (kb, description = "d".repeat(4000), { meta = false } = {}) => {
   const properties = { schema_revision: { type: "string", enum: ["rbig"] } };
   for (let i = 0; JSON.stringify(properties).length < kb * 1024; i++)
     properties[`field_${i}`] = { type: "string", title: `Field ${i}`, description: "x".repeat(200) };
-  return { name: "big_tool", title: "Big", description, inputSchema: { type: "object", properties, required: ["schema_revision"] } };
+  return {
+    name: "big_tool",
+    title: "Big",
+    description,
+    inputSchema: { type: "object", properties, required: ["schema_revision"] },
+    ...(meta ? { _meta: { "loremax.ai/workflow": { version: 1, workflowId: 77, visualId: "big-tool", title: "Big", category: "Image" } } } : {}),
+  };
 };
 
 test("profile details: within the cap the full description and how_to_call are kept", async () => {
@@ -455,4 +471,143 @@ test("profile details: a 64 KB schema is never cut — the cap grows for that re
   want.required = [];
   assert.deepEqual(r.schema, want);
   assert.ok(r.description.length <= 301);
+});
+
+// ---------- profile mode: instructions and the routing guide ----------
+
+// the fixture's identities: write_text → id 1 (no visual id), masked_edit → masked-edit (7), styled_portrait → styled-portrait (12)
+const PGUIDE = {
+  rules: ["profile rule"],
+  workflows: {
+    "masked-edit": { use_for: "edit part of an image", knobs: "the mask", caveats: "PNG masks only" },
+    "styled-portrait": { use_for: "character cards", knobs: "style", caveats: "no text" },
+    "id:1": { use_for: "short texts" },
+    "id:12": { use_for: "never shown: the visual id wins" },
+    gone: { use_for: "not in this profile" },
+  },
+  routes: [
+    { task: "character card", pick: ["gone", "styled-portrait", "masked-edit"] },
+    { task: "copy", pick: ["id:1"] },
+    { task: "dead route", pick: ["gone"] },
+  ],
+};
+const STUDIO_TEXT = "Use styled_portrait for every character card.";
+const withInstructions = (text) => () => ({ protocolVersion: "2025-06-18", instructions: text });
+
+test("profile guide list: instructions, recommended by tool names, rules, use_for and the precedence hint", async () => {
+  const { run, inits } = await profileTool(undefined, {
+    guide: PGUIDE,
+    init: withInstructions(`${STUDIO_TEXT}\nEach workflow tool call starts one paid generation; check the price first.`),
+  });
+  const r = await run({});
+  assert.deepEqual(Object.keys(r), ["instructions", "recommended", "rules", "tools", "hint"]);
+  assert.equal(r.instructions, STUDIO_TEXT);
+  assert.deepEqual(r.recommended, [
+    {
+      task: "character card",
+      tools: [
+        { tool: "styled_portrait", title: "Styled portrait", why: "character cards" },
+        { tool: "masked_edit", title: "masked_edit", why: "edit part of an image" },
+      ],
+    },
+    { task: "copy", tools: [{ tool: "write_text", title: "write_text", why: "short texts" }] },
+  ]);
+  assert.deepEqual(r.rules, ["profile rule"]);
+  const byName = Object.fromEntries(r.tools.map((t) => [t.tool, t]));
+  assert.equal(byName.styled_portrait.use_for, "character cards");
+  assert.equal(byName.write_text.use_for, "short texts");
+  assert.deepEqual(Object.keys(byName.masked_edit), ["tool", "title", "category", "description", "use_for", "required", "file_args"]);
+  // the 200-char description cut stays, use_for comes alongside it
+  assert.ok(byName.masked_edit.description.length <= 200);
+  assert.match(r.hint, /studio's instructions and each tool's own description take precedence over the generic guide/);
+  // cached: one initialize per TTL
+  await run({});
+  assert.equal(inits(), 1);
+});
+
+test("profile guide list: a tool without _meta gets no use_for and is never recommended", async () => {
+  const bare = { name: "bare_tool", title: "styled-portrait", inputSchema: { type: "object", properties: { schema_revision: { type: "string", enum: ["r1"] } }, required: ["schema_revision"] } };
+  const { run } = await profileTool(() => [bare], { guide: PGUIDE });
+  const r = await run({});
+  assert.equal("use_for" in r.tools[0], false);
+  assert.equal("recommended" in r, false);
+  assert.deepEqual(r.rules, ["profile rule"]);
+});
+
+test("profile guide list: query filters recommended (by task and by tool name) and drops rules", async () => {
+  const { run } = await profileTool(undefined, { guide: PGUIDE });
+  const byTask = await run({ query: "character" });
+  assert.equal("rules" in byTask, false);
+  assert.deepEqual(byTask.recommended.map((x) => [x.task, x.tools.map((t) => t.tool)]), [["character card", ["styled_portrait", "masked_edit"]]]);
+  const byTool = await run({ query: "masked_" });
+  assert.deepEqual(byTool.recommended.map((x) => [x.task, x.tools.map((t) => t.tool)]), [["character card", ["masked_edit"]]]);
+  assert.deepEqual(byTool.tools.map((t) => t.tool), ["masked_edit"]);
+  const none = await run({ query: "nothing-like-this" });
+  assert.deepEqual(Object.keys(none), ["instructions", "tools", "hint"]);
+});
+
+test("profile guide list: a failed initialize gives instructions null, the list intact, and is retried next call", async () => {
+  let fail = true;
+  const { run, rec, inits } = await profileTool(undefined, {
+    guide: PGUIDE,
+    init: () => (fail ? new Response("boom", { status: 500 }) : { instructions: STUDIO_TEXT }),
+  });
+  const r = await run({});
+  assert.equal(r.instructions, null);
+  assert.deepEqual(r.tools.map((t) => t.tool), ["write_text", "masked_edit", "styled_portrait"]);
+  assert.ok(r.recommended.length);
+  assert.ok(rec.logs.some((l) => l.level === "warn" && /initialize/.test(l.msg)));
+  fail = false;
+  assert.equal((await run({})).instructions, STUDIO_TEXT);
+  assert.equal(inits(), 2);
+});
+
+test("profile guide list: a dead profile is still the catalog's error", async () => {
+  const f = mockFetch([["POST", `/api/mcp/s/${PROFILE}`, () => new Response("gone", { status: 404 })]]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, profile_url: PROFILE } });
+  await activate(ctx, { guide: PGUIDE });
+  await assert.rejects(rec.tools.get("loremax_workflows").handler({}, {}), /404/);
+});
+
+test("profile guide details: guide by visual id (beats id:<n>) and by numeric id; none when unmatched; no initialize", async () => {
+  const { run, inits } = await profileTool(undefined, { guide: PGUIDE, init: withInstructions(STUDIO_TEXT) });
+  const masked = await run({ tool: "masked_edit" });
+  assert.deepEqual(Object.keys(masked), ["tool", "title", "description", "guide", "schema", "file_args", "limits", "how_to_call"]);
+  assert.deepEqual(masked.guide, { use_for: "edit part of an image", knobs: "the mask", caveats: "PNG masks only" });
+  assert.equal((await run({ tool: "styled_portrait" })).guide.use_for, "character cards");
+  assert.deepEqual((await run({ tool: "write_text" })).guide, { use_for: "short texts" });
+  const plain = await (await profileTool()).run({ tool: "masked_edit" });
+  assert.equal("guide" in plain, false);
+  assert.equal(inits(), 0);
+});
+
+test("profile guide details: over the cap the guide goes first, the description and schema stay whole", async () => {
+  const guide = { rules: [], routes: [], workflows: { "big-tool": { use_for: "big things", knobs: "k", caveats: "c".repeat(6000) } } };
+  // schema ~8 KB + 1 KB description: under the cap without the guide, over it with the guide
+  const { raw, run } = await profileTool(() => [bigTool(8, "d".repeat(1000), { meta: true })], { guide });
+  const s = await raw({ tool: "big_tool" });
+  assert.ok(s.length <= 14_000, String(s.length));
+  const r = JSON.parse(s);
+  assert.equal("guide" in r, false);
+  assert.equal(r.description.length, 1000);
+  assert.match(r.how_to_call, /PAID/);
+  assert.equal(Object.keys(r.schema.properties).length, Object.keys(bigTool(8).inputSchema.properties).length - 1);
+  // a small schema keeps the same guide
+  const small = await (await profileTool(() => [bigTool(1, "d", { meta: true })], { guide })).run({ tool: "big_tool" });
+  assert.equal(small.guide.use_for, "big things");
+});
+
+test("profile guide details: a 64 KB schema drops the guide and is never cut", async () => {
+  const guide = { rules: [], routes: [], workflows: { "big-tool": { use_for: "big things" } } };
+  const { raw } = await profileTool(() => [bigTool(64, undefined, { meta: true })], { guide });
+  const s = await raw({ tool: "big_tool" });
+  assert.doesNotMatch(s, /…\(truncated\)/);
+  const r = JSON.parse(s);
+  assert.equal("guide" in r, false);
+  assert.ok(r.description.length <= 301);
+  const want = bigTool(64).inputSchema;
+  delete want.properties.schema_revision;
+  want.required = [];
+  assert.deepEqual(r.schema, want);
 });

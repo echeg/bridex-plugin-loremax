@@ -469,7 +469,7 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
     const path = lmx.profilePath();
     const entries = [];
     let cursor;
-    // a profile holds at most 10 workflows; pages are followed only in case the server ever paginates
+    // a profile holds up to 25 tools; pages are followed only in case the server ever paginates
     for (let page = 0; page < 10; page++) {
       const msg = await lmx.rpc(path, { jsonrpc: "2.0", id: lmx.nextId(), method: "tools/list", ...(cursor ? { params: { cursor } } : {}) }, { timeoutMs: LOOKUP_TIMEOUT_MS });
       if (msg?.error) throw new Error(`loremax ${path} tools/list: ${msg.error.message ?? JSON.stringify(msg.error)}`.slice(0, 500));
@@ -600,26 +600,47 @@ export function createProfileInstructions(lmx, { now = Date.now, log } = {}) {
   return { get, invalidate };
 }
 
-/** loremax_workflows' profile list: one line per generation tool, filtered by `query` over tool, title, category and visual id. */
-function profileList(c, query) {
+/**
+ * loremax_workflows' profile list: one line per generation tool, filtered by `query` over tool, title,
+ * category and visual id. Before the tools, so cap() never cuts them: the studio's `instructions`,
+ * then the guide's `recommended` routes over the profile's tools (by tool name) and its `rules`
+ * (omitted with a query); a tool the guide knows gets a short `use_for`.
+ */
+function profileList(c, query, { guide, instructions = null } = {}) {
   const q = String(query ?? "").trim().toLowerCase();
-  const tools = [...c.tools.values()]
+  const all = [...c.tools.values()];
+  const tools = all
     .filter((t) => !q || [t.name, t.title, t.identity.category, t.identity.visualId].some((v) => String(v ?? "").toLowerCase().includes(q)))
-    .map((t) => ({
-      tool: t.name,
-      title: t.title,
-      category: t.identity.category ?? null,
-      description: t.description.slice(0, 200),
-      required: Array.isArray(t.agentSchema.required) ? t.agentSchema.required : [],
-      file_args: t.fileArgs.map(({ name, mediaType, cardinality }) => ({ name, mediaType, cardinality })),
-    }));
+    .map((t) => {
+      const entry = guideEntry(guide, t.identity);
+      return {
+        tool: t.name,
+        title: t.title,
+        category: t.identity.category ?? null,
+        description: t.description.slice(0, 200),
+        ...(entry?.use_for ? { use_for: entry.use_for } : {}),
+        required: Array.isArray(t.agentSchema.required) ? t.agentSchema.required : [],
+        file_args: t.fileArgs.map(({ name, mediaType, cardinality }) => ({ name, mediaType, cardinality })),
+      };
+    });
+  const recommended = recommendedFrom(guide, all.map((t) => ({ ...t.identity, title: t.title, tool: t.name })), q).map((rt) => ({
+    task: rt.task,
+    tools: rt.picks.map(({ item, entry }) => ({ tool: item.tool, title: item.title, why: entry?.use_for })),
+  }));
+  const rules = !q && Array.isArray(guide?.rules) && guide.rules.length ? guide.rules : undefined;
   return {
+    instructions,
+    ...(recommended.length ? { recommended } : {}),
+    ...(rules ? { rules } : {}),
     tools,
     hint: tools.length
-      ? "call loremax_workflows with tool to read its argument schema before loremax_generate"
+      ? `call loremax_workflows with tool to read its argument schema before loremax_generate. ${PROFILE_PRECEDENCE}`
       : q ? `no tool matches "${String(query).slice(0, 100)}" — call without query for the full list` : "this profile has no workflows — add some in LoreMax → Organization → MCP",
   };
 }
+
+const PROFILE_PRECEDENCE =
+  "The studio's instructions and each tool's own description take precedence over the generic guide (recommended, rules, use_for, guide) wherever they disagree.";
 
 const HOW_TO_CALL =
   "Call loremax_generate with {tool, arguments}: arguments exactly as schema names them (the plugin adds schema_revision and on_behalf_of; never send api_key). File arguments (file_args) take workspace paths — artifacts/… or files in your workdir — and the plugin uploads them; an array file argument takes a list of paths. Conditional rules (fields required, hidden or bounded depending on other fields) live in the schema's x-loremax-conditions; limits caps the media count and total size. A refused call (schema or argument error) is not charged; every accepted call is PAID.";
@@ -627,16 +648,31 @@ const HOW_TO_CALL_SHORT =
   "loremax_generate {tool, arguments}: file arguments take workspace paths (artifacts/… or workdir files); conditional rules live in x-loremax-conditions.";
 
 /**
- * loremax_workflows' profile detail. The schema is never cut (LoreMax publishes
- * schemas up to 64 KB): over REPLY_CAP the prose around it shrinks first, and if
+ * loremax_workflows' profile detail, with the guide's entry for the tool when there
+ * is one. The schema is never cut (LoreMax publishes schemas up to 64 KB): over
+ * REPLY_CAP the guide goes first, then the prose around the schema shrinks, and if
  * that is not enough the cap for this reply grows to the schema's size plus 2 KB.
  */
-function profileDetails(t) {
-  const out = (description, how_to_call) =>
-    JSON.stringify({ tool: t.name, title: t.title, description, schema: t.agentSchema, file_args: t.fileArgs, limits: t.limits, how_to_call }, null, 1);
-  let s = out(t.description, HOW_TO_CALL);
+function profileDetails(t, guide) {
+  const entry = guideEntry(guide, t.identity);
+  const out = (description, how_to_call, withGuide) =>
+    JSON.stringify({
+      tool: t.name,
+      title: t.title,
+      description,
+      ...(withGuide && entry ? { guide: { use_for: entry.use_for, knobs: entry.knobs, caveats: entry.caveats } } : {}),
+      schema: t.agentSchema,
+      file_args: t.fileArgs,
+      limits: t.limits,
+      how_to_call,
+    }, null, 1);
+  let s = out(t.description, HOW_TO_CALL, true);
   if (s.length <= REPLY_CAP) return s;
-  s = out(t.description.length > 300 ? `${t.description.slice(0, 300)}…` : t.description, HOW_TO_CALL_SHORT);
+  if (entry) {
+    s = out(t.description, HOW_TO_CALL, false);
+    if (s.length <= REPLY_CAP) return s;
+  }
+  s = out(t.description.length > 300 ? `${t.description.slice(0, 300)}…` : t.description, HOW_TO_CALL_SHORT, false);
   // the schema as it is indented inside the reply; everything before it is short, so the tail is what a cut can reach
   const n = Math.max(REPLY_CAP, JSON.stringify({ schema: t.agentSchema }, null, 1).length + 2048);
   return s.length > n ? `${s.slice(0, n)}\n…(truncated)` : s;
@@ -667,7 +703,7 @@ export function guideEntry(guide, identity) {
  * back as they are, in each route's `pick` order (an item bound under two picked
  * keys counts once). A pick the catalog lacks is skipped, a route left with no
  * pick is dropped. `query` keeps a route whose task matches it whole, and from the
- * others only the items whose title, visual id or category match.
+ * others only the items whose title, visual id, category or (profile) tool name match.
  * → [{ task, picks: [{ item, entry }] }]
  */
 export function recommendedFrom(guide, items, query) {
@@ -683,7 +719,7 @@ export function recommendedFrom(guide, items, query) {
     for (const k of r.pick) {
       for (const item of byKey.get(k) ?? []) {
         if (picks.some((p) => p.item === item)) continue;
-        if (!wholeRoute && ![item.title, item.visualId, item.category].some(matches)) continue;
+        if (!wholeRoute && ![item.title, item.visualId, item.category, item.tool].some(matches)) continue;
         picks.push({ item, entry: guideEntry(guide, item) });
       }
     }
@@ -1365,12 +1401,14 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   };
   /** The profile's tools/list, shared by every profile-mode tool (null in REST mode or with an invalid profile_url). */
   const catalog = profile?.path ? createProfileCatalog(lmx, { now, log: ctx.log }) : null;
+  /** The studio's own profile instructions, read only by the list view. */
+  const instructions = profile?.path ? createProfileInstructions(lmx, { now, log: ctx.log }) : null;
   const uploader = profile?.path ? createUploader(ctx, lmx, outputs, { now }) : null;
   if (profile) {
     profileTools.set("loremax_workflows", {
       name: "loremax_workflows",
       description:
-        "LoreMax workflows curated for this studio's profile (free). Without tool: the list (tool, title, category, required arguments, file arguments), optionally filtered by query. With tool: that workflow's exact argument schema (JSON Schema), its file arguments and limits — ALWAYS read it before a paid loremax_generate. No price is shown: every loremax_generate call is charged in LoreMax tokens.",
+        "LoreMax workflows curated for this studio's profile (free). Without tool: the studio's instructions, the recommended tools per task and the list (tool, title, category, required arguments, file arguments), optionally filtered by query; the studio's instructions and a tool's own description take precedence over the generic guide. With tool: that workflow's exact argument schema (JSON Schema), its file arguments and limits — ALWAYS read it before a paid loremax_generate. No price is shown: every loremax_generate call is charged in LoreMax tokens.",
       schema: {
         tool: z.string().optional().describe("tool name from the list; returns its argument schema"),
         query: z.string().optional().describe("case-insensitive filter over tool, title, category and visual id"),
@@ -1378,8 +1416,12 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       handler: async (args) => {
         const deadline = now() + MAX_WAIT_S * 1000;
         const name = String(args.tool ?? "").trim();
+        if (!name) {
+          // a dead profile is reported by the catalog read; the instructions never throw
+          const [c, ins] = await Promise.all([catalog.get({ deadline }), instructions.get({ deadline })]);
+          return text(cap(JSON.stringify(profileList(c, args.query, { guide, instructions: ins }), null, 1)));
+        }
         let c = await catalog.get({ deadline });
-        if (!name) return text(cap(JSON.stringify(profileList(c, args.query), null, 1)));
         let t = c.tools.get(name);
         // a tool added to the profile since the last read: one fresh tools/list before giving up
         if (!t) {
@@ -1390,7 +1432,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           const names = [...c.tools.keys()];
           throw new Error(`loremax_workflows: no such tool "${short(name, 100)}" in this profile — tools: ${names.length ? names.join(", ") : "(none)"}`);
         }
-        return text(profileDetails(t));
+        return text(profileDetails(t, guide));
       },
     });
     profileTools.set("loremax_generate", {
