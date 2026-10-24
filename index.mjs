@@ -176,6 +176,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     default_wait_s: DEFAULT_WAIT_S,
     usd_per_token: 0,
     profile_url: "",
+    allow_profile_edit: false,
     ...(ctx.config ?? {}),
   };
   // an emptied form field arrives as "" — fall back to the managed credential, not to nothing
@@ -218,6 +219,8 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     if (!m || u.search || u.hash) throw bad("is not a profile URL (/api/mcp/s/<16-character publicId>)");
     return `/api/mcp/s/${m[1]}`;
   };
+  // rewrites texts every client of the profile sees: on only for a literal true, never a "true" string
+  const allowProfileEdit = () => cfg.allow_profile_edit === true;
   const usdPerToken = () => {
     const v = Number(cfg.usd_per_token ?? 0);
     return Number.isFinite(v) && v > 0 ? v : 0;
@@ -387,7 +390,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     }
   }
 
-  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, profilePath, usdPerToken, defaultWaitS, restJson, rpc, nextId, toolResult, toolCall, mcpCall, check };
+  return { cfg, key, hasKey: () => Boolean(rawKey()), baseUrl, profilePath, allowProfileEdit, usdPerToken, defaultWaitS, restJson, rpc, nextId, toolResult, toolCall, mcpCall, check };
 }
 
 const isObj = (v) => v != null && typeof v === "object" && !Array.isArray(v);
@@ -598,6 +601,29 @@ export function createProfileInstructions(lmx, { now = Date.now, log } = {}) {
   }
 
   return { get, invalidate };
+}
+
+/**
+ * The profile's numeric id in LoreMax's management API, which knows profiles by
+ * it, not by the publicId: one GET /api/v2/mcp-servers, matched by public_id and
+ * kept in memory. → profileManagementId({ deadline }) → number.
+ */
+export function createProfileManagementId(lmx) {
+  const ids = new Map();
+  return async function profileManagementId({ deadline } = {}) {
+    const publicId = lmx.profilePath().slice("/api/mcp/s/".length);
+    if (ids.has(publicId)) return ids.get(publicId);
+    const body = await lmx.restJson("/api/v2/mcp-servers", {}, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
+    const found = (Array.isArray(body?.profiles) ? body.profiles : []).find((p) => isObj(p) && p.public_id === publicId && Number.isSafeInteger(p.id));
+    if (!found) {
+      throw Object.assign(
+        new Error(`loremax: profile ${publicId} is not among this organization's MCP profiles — it is unknown, disabled or deleted in LoreMax, or LOREMAX_API_KEY belongs to another organization; ${PROFILE_HINT}`),
+        { code: "PROFILE_NOT_FOUND" },
+      );
+    }
+    ids.set(publicId, found.id);
+    return found.id;
+  };
 }
 
 /**
@@ -2117,6 +2143,27 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       return text(JSON.stringify(await waitFor({ ...call, taskId: call.taskId ?? row?.taskId ?? null }, job, budget), null, 1));
     },
   });
+
+  /**
+   * The optional fourth tool: rewrites the profile's texts in LoreMax, which every
+   * client of the profile sees. Profile mode with allow_profile_edit only — an agent
+   * that may not edit never sees it; an invalid profile_url makes it throw the
+   * config error like every other tool.
+   */
+  if (profile && lmx.allowProfileEdit()) {
+    const profileManagementId = createProfileManagementId(lmx);
+    registerTool({
+      name: "loremax_profile_edit",
+      description:
+        "Edit this LoreMax MCP profile's texts: the profile description and the descriptions of its tools. Changes what EVERY client of the profile sees.",
+      schema: {},
+      handler: async () => {
+        const deadline = now() + MAX_WAIT_S * 1000;
+        const id = await profileManagementId({ deadline });
+        return text(JSON.stringify({ profile_id: id }, null, 1));
+      },
+    });
+  }
 
 
   /**

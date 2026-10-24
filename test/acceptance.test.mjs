@@ -107,7 +107,7 @@ test("plugin.yaml parses as YAML with the host's parser (a bare colon in a descr
   if (parse) {
     const m = parse(src);
     assert.equal(m.name, "loremax");
-    assert.deepEqual(Object.keys(m.config_schema.properties), ["api_key", "base_url", "default_wait_s", "usd_per_token", "profile_url"]);
+    assert.deepEqual(Object.keys(m.config_schema.properties), ["api_key", "base_url", "default_wait_s", "usd_per_token", "profile_url", "allow_profile_edit"]);
   }
   // every plain-scalar description must not contain ": " — that is a nested mapping to any YAML parser
   for (const [, line] of src.matchAll(/^ +description: (?!["'|>])(.*)$/gm)) {
@@ -119,7 +119,7 @@ test("plugin.yaml: every config_schema property has a default in createClient", 
   const yaml = fs.readFileSync(new URL("../plugin.yaml", import.meta.url), "utf8");
   const props = yaml.split("\n  properties:\n")[1];
   const keys = [...props.matchAll(/^ {4}([a-z_]+):\s*$/gm)].map((m) => m[1]);
-  assert.deepEqual(keys, ["api_key", "base_url", "default_wait_s", "usd_per_token", "profile_url"]);
+  assert.deepEqual(keys, ["api_key", "base_url", "default_wait_s", "usd_per_token", "profile_url", "allow_profile_edit"]);
   const { cfg } = createClient(fakeCtx().ctx);
   for (const k of keys) assert.notEqual(cfg[k], undefined, `${k} has no default`);
   assert.match(yaml, /^name: loremax$/m);
@@ -128,4 +128,7 @@ test("plugin.yaml: every config_schema property has a default in createClient", 
   assert.match(yaml, /default_wait_s:[\s\S]*?default: 45/);
   assert.match(yaml, /default_wait_s:[\s\S]*?maximum: 50/);
   assert.equal(cfg.default_wait_s, 45);
+  // editing the profile's texts is opt-in in both places
+  assert.match(yaml, /allow_profile_edit:[\s\S]*?type: boolean[\s\S]*?default: false/);
+  assert.equal(cfg.allow_profile_edit, false);
 });

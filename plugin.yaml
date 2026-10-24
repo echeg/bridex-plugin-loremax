@@ -47,3 +47,8 @@ config_schema:
       title: MCP profile
       placeholder: "https://loremax.ai/api/mcp/s/<publicId>"
       description: Optional. A LoreMax MCP profile (Organization → MCP) — its URL or bare 16-character publicId. Set, agents see only the profile's curated workflows; empty = every workflow of the organization
+    allow_profile_edit:
+      type: boolean
+      title: Let agents edit the profile's texts
+      default: false
+      description: Profile mode only. On, agents get loremax_profile_edit and can rewrite the profile's description and its tools' descriptions in LoreMax — for every client of the profile, not only Bridex. Bindings, tool names and activation are never changed

@@ -199,18 +199,19 @@
 - [x] run tests - must pass before task 5
 
 ### Task 5: `allow_profile_edit` and the profile's management id
-- [ ] add `allow_profile_edit` (boolean, default false, title and description saying it lets agents rewrite the
+- [x] add `allow_profile_edit` (boolean, default false, title and description saying it lets agents rewrite the
   profile's texts in LoreMax for every client of the profile) to `plugin.yaml` `config_schema` and to config
   parsing (`true` only for a literal `true`)
-- [ ] register `loremax_profile_edit` only when profile mode AND `allow_profile_edit` (through the existing
+- [x] register `loremax_profile_edit` only when profile mode AND `allow_profile_edit` (through the existing
   `registerTool` wrapper, so an invalid `profile_url` makes it throw the config error)
-- [ ] add `profileManagementId({ deadline })`: `GET /api/v2/mcp-servers`, match `public_id` to the profile's
+- [x] add `profileManagementId({ deadline })`: `GET /api/v2/mcp-servers`, match `public_id` to the profile's
   publicId, cache the numeric id in memory; not found → an error naming the publicId and the three causes
   (unknown, disabled or deleted, another organization)
-- [ ] write tests: not registered in REST mode, not registered without the flag, registered with it; the flag
+- [x] write tests: not registered in REST mode, not registered without the flag, registered with it; the flag
   rejects `"true"` strings and other values; id lookup cached across calls; no match → the named error; a 3xx
   refused like every other request
-- [ ] run tests - must pass before task 6
+- [x] ➕ until Task 6, `loremax_profile_edit`'s handler only resolves the management id (`{ profile_id }`, read-only)
+- [x] run tests - must pass before task 6
 
 ### Task 6: `loremax_profile_edit` — preview and apply
 - [ ] args: `instructions?: string | null` (profile description; omitted = unchanged; `null` or `""` clears),
