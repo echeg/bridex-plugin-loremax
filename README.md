@@ -215,14 +215,19 @@ tool's text, leave the tool out of `tools`. Tools are named by their current
 names as `loremax_workflows` lists them.
 
 1. **Preview** (`apply: false`, the default): nothing is saved. The reply is
-   `{ applied: false, incompatible, hint, changes: [{ field, before, after }] }`
+   `{ applied: false, incompatible, hint, warning?, changes: [{ field, before, after }] }`
    (`field` is `description` or `tool:<name>`), checked by LoreMax's own
    preview. A non-empty `incompatible` means LoreMax would refuse the save;
    it comes before `changes`, so a long diff is cut, never the verdict.
 2. **Apply** (`apply: true`): the plugin rereads the profile right before
    saving, so the changes are recomputed against what LoreMax holds now, and
-   saves it. The reply is `{ applied: true, hint, changes }`; the plugin then
-   rereads the tool list and the instructions on the next call.
+   saves it. The reply is `{ applied: true, hint, warning?, changes }`; the
+   plugin then rereads the tool list and the instructions on the next call.
+
+LoreMax's read also drops a URL's `#fragment` and `user:pass@`, leaving no
+marker, and a save sends every unchanged text back as read. So when an
+unchanged text holds a URL, both replies carry a `warning` that names it: to
+keep such a part, pass that text in full in the same edit.
 
 Refused before anything is saved:
 

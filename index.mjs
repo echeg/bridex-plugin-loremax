@@ -691,7 +691,8 @@ function profileEditRequest(args) {
 /**
  * LoreMax's profile (GET /api/v2/mcp-servers/<id>) + the request → the strict PUT
  * body (`{ name, description, is_active, tools: [{ workflow_id, tool_name,
- * tool_description }] }` in position order, bindings untouched) and the changes.
+ * tool_description }] }` in position order, bindings untouched), the changes and
+ * `linked`: the unchanged fields holding a URL, sent back as LoreMax read them.
  * Refuses an unknown tool name and any text sent with REDACTED in it, changed or
  * not: LoreMax would store the redaction in place of the real text.
  */
@@ -732,7 +733,9 @@ function profileEditPlan(profile, req) {
     const hit = unchanged.find(([, v]) => String(v).includes(REDACTED));
     if (hit) fail(`the profile's ${hit[0]} contains "${REDACTED}" (LoreMax hides URL query strings when reading it) — saving would overwrite the real text; ${PROFILE_MCP_PAGE}`);
   }
-  return { body, changes };
+  // the same read drops a URL's #fragment and user:pass@ with no marker to refuse on: only a warning can say so
+  const linked = unchanged.filter(([, v]) => /https?:\/\//i.test(String(v))).map(([label]) => label);
+  return { body, changes, linked };
 }
 
 /** A LoreMax workflows[] list → the ones it marks compatible: false. */
@@ -744,7 +747,7 @@ const incompatibleOf = (workflows) => (Array.isArray(workflows) ? workflows : []
  * PUT ?preview=true, nothing saved. Apply: the profile is read right before the
  * PUT, so the diff is against what LoreMax holds now (no ETag: an edit landing
  * between that read and the PUT is lost). `onSaved` runs after a save, and after
- * one whose outcome is unknown. edit(args, { deadline }) → { applied, incompatible?, hint, changes }.
+ * one whose outcome is unknown. edit(args, { deadline }) → { applied, incompatible?, hint, warning?, changes }.
  */
 export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) {
   return async function edit(args, { deadline } = {}) {
@@ -774,8 +777,13 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
       throw refused(e);
     }
     if (!isObj(got?.profile) || !Array.isArray(got.profile.tools)) throw new Error(`loremax_profile_edit: LoreMax's ${p} has no readable profile`);
-    const { body, changes } = profileEditPlan(got.profile, req);
+    const { body, changes, linked } = profileEditPlan(got.profile, req);
     if (!changes.length) return { applied: false, hint: "nothing to change: the profile already has these texts", changes };
+    const urls = (saved) => (linked.length ? {
+      warning: `unchanged texts with a URL (${linked.join(", ")}): LoreMax reads a URL without its #fragment and user:pass@, leaving no "${REDACTED}" marker, so ${saved
+        ? "they were sent back without any such part — pass a text in full in another edit to restore it"
+        : "saving sends them back without those parts — to keep one, pass that text in full in this edit"}`,
+    } : {});
     const put = (preview) => lmx.restJson(`${p}${preview ? "?preview=true" : ""}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -797,6 +805,7 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
         hint: incompatible.length
           ? `LoreMax would refuse this save: the profile binds incompatible workflows — ${PROFILE_MCP_PAGE}`
           : "nothing saved yet — show these changes, then call again with apply: true to save",
+        ...urls(false),
         changes,
       };
     }
@@ -816,7 +825,7 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
       }
     }
     onSaved?.();
-    return { applied: true, hint: "saved: every client of the profile sees the new texts", changes };
+    return { applied: true, hint: "saved: every client of the profile sees the new texts", ...urls(true), changes };
   };
 }
 

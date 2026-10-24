@@ -22,7 +22,8 @@ texts.
   client of the profile — never bindings, tool names or activation. `apply: false` (default) previews through
   LoreMax and returns `changes: [{ field, before, after }]`; `apply: true` rereads the profile and saves. It refuses,
   before saving, an unknown tool name, a text over 2000 characters, any text sent with `[redacted]` in it (unchanged,
-  or copied into a new text) and a profile with incompatible workflows. After a save the tool list and the
+  or copied into a new text) and a profile with incompatible workflows. An unchanged text holding a URL, which
+  LoreMax reads without its `#fragment` and `user:pass@`, is named in a `warning`. After a save the tool list and the
   instructions are reread.
 - Generation, uploads, results, the watcher and the health check make the same requests as in 0.2.1.
 

@@ -271,6 +271,32 @@ test("profile edit: an unchanged text holding [redacted] is refused by name, no 
   assert.deepEqual((await edit({ instructions: "Clean" })).changes, [{ field: "description", before: "Ref ?[redacted]", after: "Clean" }]);
 });
 
+test("profile edit: an unchanged text holding a URL is sent back as read, with a warning naming it", async () => {
+  // LoreMax's read drops #fragment and user:pass@ without a marker: the plugin cannot refuse, only warn
+  const body = PROFILE_BODY();
+  body.profile.description = "Style guide: https://docs.studio.test/brand";
+  body.profile.tools[0].tool_description = "Portraits, see HTTPS://docs.studio.test/portraits";
+  const { edit, saves } = editor(profileRoutes(() => structuredClone(body)));
+  const preview = await edit({ tools: [{ tool: "masked_edit", description: "Repaint the masked area only" }] });
+  assert.deepEqual(Object.keys(preview), ["applied", "incompatible", "hint", "warning", "changes"]);
+  assert.match(preview.warning, /^unchanged texts with a URL \(description, tool:styled_portrait\): .*#fragment and user:pass@.*to keep one, pass that text in full in this edit$/);
+  const applied = await edit({ tools: [{ tool: "masked_edit", description: "Repaint the masked area only" }], apply: true });
+  assert.deepEqual(Object.keys(applied), ["applied", "hint", "warning", "changes"]);
+  assert.match(applied.warning, /\(description, tool:styled_portrait\): .*were sent back without any such part/);
+  assert.equal(saves()[0].json.description, "Style guide: https://docs.studio.test/brand");
+  restore();
+  // a URL in the text being replaced is sent as typed: no warning for it
+  const plain = PROFILE_BODY();
+  plain.profile.description = "See https://docs.studio.test/brand";
+  const second = editor(profileRoutes(() => structuredClone(plain)));
+  const r = await second.edit({ instructions: "See https://docs.studio.test/brand#colors" });
+  assert.equal(r.warning, undefined);
+  assert.equal("warning" in (await second.edit({ tools: [{ tool: "masked_edit", description: "x" }] })), true);
+  restore();
+  const none = editor(profileRoutes(() => PROFILE_BODY()));
+  assert.equal("warning" in (await none.edit({ instructions: "x", apply: true })), false);
+});
+
 test("profile edit: incompatible workflows — the preview reports them, apply refuses without a PUT", async () => {
   const bad = { workflow_id: 12, compatible: false, reason: "workflow disabled" };
   const body = PROFILE_BODY();

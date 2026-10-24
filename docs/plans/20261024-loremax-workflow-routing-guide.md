@@ -84,7 +84,8 @@
     (array order = position; unknown keys such as `position` give 400); `?preview=true` returns
     `{ workflows, preview }` without saving; a save with any `compatible: false` workflow is 400 with `workflows`;
     `description` and `tool_description` ≤ 2000 chars; names and descriptions come back with URL query strings
-    replaced by `?[redacted]`; another organization's or an unknown id is 404.
+    replaced by `?[redacted]` and a URL's `#fragment` and `user:pass@` dropped without a marker (an unchanged text
+    with a URL gets a `warning`); another organization's or an unknown id is 404.
   - The profile's `initialize` result carries `instructions` = the manager's profile description, then LoreMax's
     standard rules, joined by `\n`; tools work without `initialize`.
   - Tests: `node --test test/`, `fakeCtx` and `mockFetch` in `test/helpers.mjs`, fixture
