@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { GUIDE } from "./guide.mjs";
+
+// Bridex loads an update as index.mjs?v=<commit>: a static "./guide.mjs" drops that
+// query and Node's import cache keeps serving the first release's guide until a restart
+const { GUIDE } = await import(new URL(`./guide.mjs${new URL(import.meta.url).search}`, import.meta.url).href);
 
 /**
  * LoreMax plugin: image, video, audio, 3D and text generation through the
@@ -635,17 +638,24 @@ export function createProfileInstructions(lmx, { now = Date.now, log } = {}) {
   return { get, invalidate };
 }
 
+/** The server, profile and key a management id belongs to, as the next request would read them. */
+const profileScope = (lmx) => `${lmx.baseUrl()}${lmx.profilePath()} ${sha256(lmx.key())}`;
+
 /**
  * The profile's numeric id in LoreMax's management API, which knows profiles by
  * it, not by the publicId: one GET /api/v2/mcp-servers, matched by public_id and
- * kept in memory. → profileManagementId({ deadline }) → number.
+ * kept in memory for the server, profile and key it was found with. →
+ * profileManagementId({ deadline }) → number.
  */
 export function createProfileManagementId(lmx) {
-  // profile_url is fixed for the client's life: one id
-  let id = null;
+  // LOREMAX_BASE_URL and the key are read per call: an id from another server (or
+  // organization) could name an unrelated profile there, so a changed scope looks it up again
+  let cached = null;
   return async function profileManagementId({ deadline } = {}) {
-    if (id != null) return id;
-    const publicId = lmx.profilePath().slice("/api/mcp/s/".length);
+    const path = lmx.profilePath();
+    const scope = profileScope(lmx);
+    if (cached?.scope === scope) return cached.id;
+    const publicId = path.slice("/api/mcp/s/".length);
     const body = await lmx.restJson("/api/v2/mcp-servers", {}, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
     const found = (Array.isArray(body?.profiles) ? body.profiles : []).find((p) => isObj(p) && p.public_id === publicId && Number.isSafeInteger(p.id));
     if (!found) {
@@ -654,8 +664,8 @@ export function createProfileManagementId(lmx) {
         { code: "PROFILE_NOT_FOUND" },
       );
     }
-    id = found.id;
-    return id;
+    cached = { scope, id: found.id };
+    return found.id;
   };
 }
 
@@ -753,8 +763,19 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
   return async function edit(args, { deadline } = {}) {
     const req = profileEditRequest(isObj(args) ? args : {});
     const apply = args?.apply === true;
+    // read in the same tick as the id lookup's own: the scope that id was found with
+    const scope = profileScope(lmx);
     const id = await profileManagementId({ deadline });
     const p = `/api/v2/mcp-servers/${id}`;
+    // the address or key can change while a request is out: the id would then name another
+    // server's (or organization's) profile, so no later request of this edit goes there.
+    // Checked synchronously before restJson reads them: nothing runs in between
+    const request = (path, init, timeoutMs) => {
+      if (profileScope(lmx) !== scope) {
+        throw new Error(`loremax_profile_edit: LoreMax's address, key or profile changed during this edit (LOREMAX_BASE_URL, LOREMAX_API_KEY or profile_url) — profile ${id} was found on the old one, nothing was saved; call again`);
+      }
+      return lmx.restJson(path, init, { timeoutMs, deadline });
+    };
     const refused = (e) => {
       if (e?.status === 404) {
         return Object.assign(new Error(`loremax_profile_edit: LoreMax has no profile ${id} any more — it was deleted, or LOREMAX_API_KEY belongs to another organization; ${PROFILE_HINT}`), { code: "PROFILE_NOT_FOUND" });
@@ -772,7 +793,7 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
     };
     let got;
     try {
-      got = await lmx.restJson(p, {}, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
+      got = await request(p, {}, LOOKUP_TIMEOUT_MS);
     } catch (e) {
       throw refused(e);
     }
@@ -784,11 +805,11 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
         ? "they were sent back without any such part — pass a text in full in another edit to restore it"
         : "saving sends them back without those parts — to keep one, pass that text in full in this edit"}`,
     } : {});
-    const put = (preview) => lmx.restJson(`${p}${preview ? "?preview=true" : ""}`, {
+    const put = (preview) => request(`${p}${preview ? "?preview=true" : ""}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-    }, { timeoutMs: LOOKUP_TIMEOUT_MS * 3, deadline });
+    }, LOOKUP_TIMEOUT_MS * 3);
 
     if (!apply) {
       let r;

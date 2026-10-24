@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { GUIDE } from "../guide.mjs";
 import { guideKey, guideEntry, recommendedFrom } from "../index.mjs";
+import { fakeCtx, mockFetch } from "./helpers.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // exactly what guideKey() writes: "id:007" would never be found
@@ -157,4 +159,26 @@ test("recommendedFrom: the shipped guide over a catalog holding all its workflow
   const items = Object.keys(GUIDE.workflows).map((k) => (/^id:\d+$/.test(k) ? { workflowId: Number(k.slice(3)) } : { visualId: k }));
   assert.deepEqual(recommendedFrom(GUIDE, items).map((r) => r.task), GUIDE.routes.map((r) => r.task));
   assert.deepEqual(recommendedFrom(GUIDE, []), []);
+});
+
+// --- plugin updates ---
+
+test("an update loaded as index.mjs?v=<commit> serves that release's guide, not the first one's", async (t) => {
+  // Bridex reloads an updated plugin in-process by importing its entry with ?v=<commit>
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loremax-reload-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.copyFileSync(path.join(ROOT, "index.mjs"), path.join(dir, "index.mjs"));
+  const release = (rules) => fs.writeFileSync(path.join(dir, "guide.mjs"), `export const GUIDE = ${JSON.stringify({ rules, workflows: {}, routes: [] })};\n`);
+  const f = mockFetch([["GET", "/api/v1/workflows", () => ({ workflows: [] })]]);
+  t.after(f.restore);
+  const rulesOf = async (commit) => {
+    const { default: activateRelease } = await import(`${pathToFileURL(path.join(dir, "index.mjs")).href}?v=${commit}`);
+    const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: "https://lm.test" } });
+    await activateRelease(ctx);
+    return JSON.parse((await rec.tools.get("loremax_workflows").handler({}, {})).content[0].text).rules;
+  };
+  release(["release one"]);
+  assert.deepEqual(await rulesOf("aaa111"), ["release one"]);
+  release(["release two"]);
+  assert.deepEqual(await rulesOf("bbb222"), ["release two"]);
 });

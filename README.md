@@ -248,8 +248,9 @@ timeout, a dropped connection, a gateway 5xx without LoreMax's own body) may or
 may not have been stored, so the agent previews again to see.
 
 The plugin finds the profile's management id by its publicId in the
-organization's profile list (cached), and every request costs one unit of the
-key's rate limit. LoreMax has no version check on a save: a manager's edit that
+organization's profile list (cached until the LoreMax address or key changes;
+an edit during which either changes stops before its next request, unsaved),
+and every request costs one unit of the key's rate limit. LoreMax has no version check on a save: a manager's edit that
 lands between the plugin's reread and its save is lost. Editing the same profile
 from LoreMax and from an agent at the same time is best avoided.
 

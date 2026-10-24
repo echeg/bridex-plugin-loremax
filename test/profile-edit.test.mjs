@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import activate, { createClient, createProfileManagementId, createProfileEditor } from "../index.mjs";
-import { fakeCtx, mockFetch, jsonResponse } from "./helpers.mjs";
+import { fakeCtx, mockFetch, jsonResponse, withEnv } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
 const PROFILE = "AbCdEfGh12345678";
@@ -100,6 +100,77 @@ test("profile edit: the management id is found by public_id and cached across ca
   await edit.handler({ instructions: "Newer rules" }, CALL);
   assert.equal(g.calls.filter((c) => SERVERS_RE.test(c.url)).length, 1);
   assert.deepEqual(g.calls.filter((c) => c.method === "GET" && ONE_RE.test(c.url)).map((c) => c.url), [`${BASE}/api/v2/mcp-servers/17`, `${BASE}/api/v2/mcp-servers/17`]);
+});
+
+test("profile edit: a cached id serves only the server and key it was found with", async () => {
+  const restoreEnv = withEnv({ LOREMAX_BASE_URL: "https://a.test", LOREMAX_API_KEY: "lmx_prod_a" });
+  const f = mockFetch([
+    ["GET", /^https:\/\/a\.test\/api\/v2\/mcp-servers$/, () => SERVERS],
+    // another LoreMax: its profile 17 is someone else's, ours is not there
+    ["GET", /^https:\/\/b\.test\/api\/v2\/mcp-servers$/, () => ({ profiles: [{ id: 17, public_id: "ZzZzZzZzZzZzZzZz", name: "Unrelated" }] })],
+    ...profileRoutes(() => PROFILE_BODY()),
+  ]);
+  restore = () => {
+    f.restore();
+    restoreEnv();
+  };
+  const lmx = createClient(fakeCtx({ config: { profile_url: PROFILE } }).ctx);
+  const profileManagementId = createProfileManagementId(lmx);
+  const edit = createProfileEditor(lmx, { profileManagementId });
+  const lookups = () => f.calls.filter((c) => SERVERS_RE.test(c.url)).map((c) => `${new URL(c.url).host} ${c.headers["x-api-key"]}`);
+  assert.equal((await edit({ instructions: "New rules" })).applied, false);
+
+  // the address changes between the preview and the apply: never profile 17 of the new server
+  process.env.LOREMAX_BASE_URL = "https://b.test";
+  await assert.rejects(edit({ instructions: "New rules", apply: true }), (e) => e.code === "PROFILE_NOT_FOUND" && e.message.includes(PROFILE));
+  assert.equal(f.calls.some((c) => c.url.startsWith("https://b.test/api/v2/mcp-servers/")), false);
+
+  // back on the first server with another key: looked up again; then cached for that key
+  process.env.LOREMAX_BASE_URL = "https://a.test";
+  process.env.LOREMAX_API_KEY = "lmx_prod_b";
+  assert.equal(await profileManagementId(), 17);
+  assert.equal(await profileManagementId(), 17);
+  assert.deepEqual(lookups(), ["a.test lmx_prod_a", "b.test lmx_prod_a", "a.test lmx_prod_b"]);
+});
+
+test("profile edit: the address or key changing while a request is out stops the edit before its next request", async () => {
+  const restoreEnv = withEnv({ LOREMAX_BASE_URL: "https://a.test", LOREMAX_API_KEY: "lmx_prod_a" });
+  // what changes in the environment while that request is out; every host answers, as another LoreMax with a profile 17 would
+  let duringLookup = () => {};
+  let duringRead = () => {};
+  const f = mockFetch([
+    ["GET", SERVERS_RE, () => (duringLookup(), SERVERS)],
+    ...profileRoutes(() => (duringRead(), PROFILE_BODY())),
+  ]);
+  restore = () => {
+    f.restore();
+    restoreEnv();
+  };
+  let saved = 0;
+  const lmx = createClient(fakeCtx({ config: { profile_url: PROFILE } }).ctx);
+  const edit = createProfileEditor(lmx, { profileManagementId: createProfileManagementId(lmx), onSaved: () => saved++ });
+  const sent = () => f.calls.map((c) => `${c.method} ${new URL(c.url).host} ${c.headers["x-api-key"]}`);
+  const stopped = (e) => /changed during this edit/.test(e.message) && e.message.includes("nothing was saved");
+
+  // the address changes during the id lookup: never GET or PUT b.test's profile 17
+  duringLookup = () => (process.env.LOREMAX_BASE_URL = "https://b.test");
+  await assert.rejects(edit({ instructions: "New rules", apply: true }), stopped);
+  assert.deepEqual(sent(), ["GET a.test lmx_prod_a"]);
+
+  // the key (another organization) changes during the profile read: no PUT with either key
+  duringLookup = () => {};
+  process.env.LOREMAX_BASE_URL = "https://a.test";
+  duringRead = () => (process.env.LOREMAX_API_KEY = "lmx_prod_b");
+  await assert.rejects(edit({ instructions: "New rules", apply: true }), stopped);
+  assert.deepEqual(sent(), ["GET a.test lmx_prod_a", "GET a.test lmx_prod_a"]);
+  assert.equal(saved, 0);
+
+  // calling again in one scope saves
+  duringRead = () => {};
+  process.env.LOREMAX_API_KEY = "lmx_prod_a";
+  assert.equal((await edit({ instructions: "New rules", apply: true })).applied, true);
+  assert.deepEqual(sent().slice(2), ["GET a.test lmx_prod_a", "PUT a.test lmx_prod_a"]);
+  assert.equal(saved, 1);
 });
 
 test("profile edit: no matching profile → an error naming the publicId and the causes", async () => {
