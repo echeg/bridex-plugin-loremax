@@ -137,10 +137,9 @@ past the call's deadline); LoreMax allows 60 runs a minute and 1000 an hour.
 ## The routing guide
 
 The plugin ships a curated guide, `guide.mjs` — the loremax counterpart of the
-media plugin's `media-generation` wiki page. In 0.3.0 the shipped guide carries
-only the `rules`: `recommended`, `use_for` and `guide` show up once its
-`workflows` and `routes` are filled from a catalog export (see **Updating the
-guide** below), and until then they are left out of every reply.
+media plugin's `media-generation` wiki page. It covers 62 workflows of the
+catalog shared by all organizations and 27 tasks across image, video, audio and
+text, filled from a catalog export (see **Updating the guide** below).
 
 - `rules`: model-agnostic rules of thumb (read the inputs before a paid call,
   one base character card varied through references, aspect ratio by placement,
@@ -192,7 +191,11 @@ LoreMax repository) at `docs/catalog/loremax-workflows.json`, or point
 `LOREMAX_CATALOG_EXPORT` at it; the path is git-ignored and never committed.
 Compare it against `guide.mjs`, update the entries and routes, run `npm test`
 (the guide test then checks every key against the export) and release. Cheap or
-draft workflows are never a route's first pick; no organization-specific names,
+draft workflows are never a route's first pick. In REST mode `recommended` and
+`rules` must fit under the reply cap with every guide workflow live (a test
+checks it): keep `use_for` to one short line and a route to its two or three
+best picks — a workflow without a route still gets its `guide` in the details
+and its `use_for` in a profile list. No organization-specific names,
 provider URLs, prices or internal settings go into `guide.mjs` — this
 repository is public.
 

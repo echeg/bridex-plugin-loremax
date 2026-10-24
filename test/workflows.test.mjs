@@ -249,6 +249,22 @@ test("guide list: recommended and rules survive cap() with a huge list", async (
   assert.match(head, /"rule two"/);
 });
 
+test("guide list: the shipped guide's recommended and rules fit under the cap with every guide workflow live", async () => {
+  // REST cap() cuts the reply's tail: a guide that grows past REPLY_CAP would cut recommended itself
+  const live = Object.keys(GUIDE.workflows).map((k, i) => ({ id: 1000 + i, visualId: k, title: `Image2Image ${k.replace(/[_-]/g, " ")}`, description: "x".repeat(200), category: "image" }));
+  const many = Array.from({ length: 300 }, (_, i) => ({ id: 100 + i, visualId: `w-${i}`, title: `Workflow ${i}`, description: "x".repeat(200), category: "image" }));
+  const f = mockFetch([["GET", "/api/v1/workflows", () => ({ workflows: [...live, ...many] })]]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  await activate(ctx);
+  const out = (await rec.tools.get("loremax_workflows").handler({}, {})).content[0].text;
+  const listAt = out.indexOf('\n "workflows": [');
+  assert.ok(listAt > 0, "recommended and rules overflow the reply cap");
+  const head = JSON.parse(`${out.slice(0, listAt).replace(/,$/, "")}\n}`);
+  assert.deepEqual(head.recommended.map((r) => r.task), GUIDE.routes.map((r) => r.task));
+  assert.deepEqual(head.rules, GUIDE.rules);
+});
+
 test("guide list: query filters recommended and drops rules", async () => {
   const f = mockFetch([["GET", "/api/v1/workflows", () => LIST]]);
   restore = f.restore;

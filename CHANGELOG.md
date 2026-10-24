@@ -9,8 +9,9 @@ texts.
   `caveats`, and `routes` (tasks with their workflows, best first). It is always intersected with the live catalog,
   so an agent never sees a workflow its organization or profile lacks. REST `loremax_workflows` lists `recommended`
   (the best live workflows per task) and `rules` before the workflows, and a workflow's details carry `guide`. With a
-  `query`, `recommended` is filtered by it and `rules` is left out. The shipped guide carries only the `rules` for
-  now: its workflows and routes are filled from a catalog export (see README → The routing guide).
+  `query`, `recommended` is filtered by it and `rules` is left out. The shipped guide covers 62 workflows of the shared
+  catalog and 27 tasks across image, video, audio and text, filled from a catalog export (see README → The routing
+  guide); a test keeps `recommended` and `rules` under the REST reply cap with every guide workflow live.
 - **Profile instructions**: in profile mode the list carries `instructions` — the profile's description, read through
   `initialize` only when the agent lists the tools, cached for 10 minutes, with LoreMax's standard operating lines
   dropped; `null` when `initialize` fails, with the list intact. The list also carries `recommended` by profile tool
