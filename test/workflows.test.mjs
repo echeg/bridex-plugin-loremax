@@ -23,7 +23,10 @@ const LIST = {
 const mcpRoute = (byTool) => ["POST", "/api/mcp", (req) => byTool[req.json.params.name](req.json.params.arguments)];
 
 let restore = () => {};
-afterEach(() => restore());
+afterEach(() => {
+  restore();
+  restore = () => {};
+});
 
 test("registers loremax_workflows as a free tool", async () => {
   const { rec } = await tool();
@@ -253,6 +256,9 @@ test("guide list: query filters recommended and drops rules", async () => {
   const byTask = await run({ query: "video from" });
   assert.equal("rules" in byTask, false);
   assert.deepEqual(byTask.recommended.map((x) => [x.task, x.workflows.map((w) => w.id)]), [["video from a frame", [12, 11]]]);
+  // no row matches the task's words, yet recommended does: the hint leads on, never "no workflow matches"
+  assert.deepEqual(byTask.workflows, []);
+  assert.match(byTask.hint, /call loremax_workflows with workflow_id/);
   // by item: only the matching workflows of each route
   const byItem = await run({ query: "kling" });
   assert.equal("rules" in byItem, false);
@@ -329,7 +335,12 @@ async function profileTool(tools = () => structuredClone(FIXTURE.result.tools), 
       return jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: { tools: tools() } });
     },
   ]]);
-  restore = f.restore;
+  // a test may build two of these: the real fetch comes back only once both are undone
+  const before = restore;
+  restore = () => {
+    f.restore();
+    before();
+  };
   const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, profile_url: PROFILE } });
   await activate(ctx, guide ? { guide } : {});
   const t = rec.tools.get("loremax_workflows");
@@ -539,6 +550,9 @@ test("profile guide list: query filters recommended (by task and by tool name) a
   const byTask = await run({ query: "character" });
   assert.equal("rules" in byTask, false);
   assert.deepEqual(byTask.recommended.map((x) => [x.task, x.tools.map((t) => t.tool)]), [["character card", ["styled_portrait", "masked_edit"]]]);
+  // no row matches the task's words, yet recommended does: the usual hint, precedence included
+  assert.deepEqual(byTask.tools, []);
+  assert.match(byTask.hint, /call loremax_workflows with tool .* take precedence over the generic guide/);
   const byTool = await run({ query: "masked_" });
   assert.deepEqual(byTool.recommended.map((x) => [x.task, x.tools.map((t) => t.tool)]), [["character card", ["masked_edit"]]]);
   assert.deepEqual(byTool.tools.map((t) => t.tool), ["masked_edit"]);

@@ -137,12 +137,17 @@ past the call's deadline); LoreMax allows 60 runs a minute and 1000 an hour.
 ## The routing guide
 
 The plugin ships a curated guide, `guide.mjs` — the loremax counterpart of the
-media plugin's `media-generation` wiki page:
+media plugin's `media-generation` wiki page. In 0.3.0 the shipped guide carries
+only the `rules`: `recommended`, `use_for` and `guide` show up once its
+`workflows` and `routes` are filled from a catalog export (see **Updating the
+guide** below), and until then they are left out of every reply.
 
 - `rules`: model-agnostic rules of thumb (read the inputs before a paid call,
   one base character card varied through references, aspect ratio by placement,
-  transparent backgrounds for game assets, preview cheap then commit, one take
-  per video scene, look at the result, cheap or draft only when asked);
+  transparent backgrounds for game assets, text in the picture only with
+  workflows whose description or guide says they render it, preview cheap then
+  commit, one take per video scene, look at the result, cheap or draft only when
+  asked);
 - `workflows`: per workflow, keyed by its visual id (else `id:<n>`), `use_for`
   (one line), `knobs` (the inputs that matter) and `caveats` (what goes wrong);
 - `routes`: tasks (a game asset with transparency, key art, a base character
@@ -185,8 +190,7 @@ Compare it against `guide.mjs`, update the entries and routes, run `npm test`
 (the guide test then checks every key against the export) and release. Cheap or
 draft workflows are never a route's first pick; no organization-specific names,
 provider URLs, prices or internal settings go into `guide.mjs` — this
-repository is public. Until an export exists the shipped guide carries only the
-`rules`, and `recommended` is left out of every reply.
+repository is public.
 
 ## Editing the profile's texts
 
@@ -205,17 +209,19 @@ workflows are bound, the tool names or whether the profile is active.
   "apply": false }
 ```
 
-`instructions` omitted keeps the description; `null` or `""` clears it, and the
-same goes for a tool's `description`. Tools are named by their current names as
-`loremax_workflows` lists them.
+`instructions` omitted keeps the description; `null` or `""` clears it. Each
+`tools[]` entry must carry a `description` (`null` or `""` clears it); to keep a
+tool's text, leave the tool out of `tools`. Tools are named by their current
+names as `loremax_workflows` lists them.
 
 1. **Preview** (`apply: false`, the default): nothing is saved. The reply is
-   `{ applied: false, changes: [{ field, before, after }], incompatible, hint }`
+   `{ applied: false, incompatible, hint, changes: [{ field, before, after }] }`
    (`field` is `description` or `tool:<name>`), checked by LoreMax's own
-   preview. A non-empty `incompatible` means LoreMax would refuse the save.
+   preview. A non-empty `incompatible` means LoreMax would refuse the save;
+   it comes before `changes`, so a long diff is cut, never the verdict.
 2. **Apply** (`apply: true`): the plugin rereads the profile right before
    saving, so the changes are recomputed against what LoreMax holds now, and
-   saves it. The reply is `{ applied: true, changes, hint }`; the plugin then
+   saves it. The reply is `{ applied: true, hint, changes }`; the plugin then
    rereads the tool list and the instructions on the next call.
 
 Refused before anything is saved:
@@ -223,14 +229,17 @@ Refused before anything is saved:
 - nothing to change requested, or a text over 2000 characters;
 - a tool name that is not bound to the profile (the error lists the bound
   ones);
-- a field that would be sent back unchanged but contains `[redacted]`: LoreMax
-  hides URL query strings when the profile is read, and saving would overwrite
-  the real text, so a person must fix it in LoreMax → Organization → MCP;
+- a field that would be sent back unchanged but contains `[redacted]`, or a new
+  text that contains it (usually a redacted `before` copied into the edit):
+  LoreMax hides URL query strings when the profile is read, and saving would
+  store the redaction in place of the real URL, so a person must fix it in
+  LoreMax → Organization → MCP;
 - a profile that binds a workflow LoreMax marks incompatible.
 
 The texts already in place are reported as "nothing to change", with no save.
 LoreMax's own refusals (400, with its issues and incompatible workflows) and an
-unknown profile (404) come back as tool errors; a save that gets no reply may or
+unknown profile (404) come back as tool errors; a save that gets no reply (a
+timeout, a dropped connection, a gateway 5xx without LoreMax's own body) may or
 may not have been stored, so the agent previews again to see.
 
 The plugin finds the profile's management id by its publicId in the
@@ -451,3 +460,6 @@ must stay `integration`.
 ```sh
 npm test    # node --test test/ — a fake ctx and a mocked fetch, no network
 ```
+
+A release bumps `version` in `package.json`, `plugin.yaml` and `PLUGIN_VERSION`
+in `index.mjs` together; `npm test` fails when they differ.

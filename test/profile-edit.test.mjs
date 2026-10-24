@@ -299,6 +299,107 @@ test("profile edit: a 400 surfaces LoreMax's issues and incompatible workflows; 
   assert.equal(gone.puts().length, 0);
 });
 
+test("profile edit: a 400 without JSON, and LoreMax's error or message, still say what was refused", async () => {
+  for (const [reply, re] of [
+    [() => new Response("tool_description too long", { status: 400 }), /refused the profile \(400\): "tool_description too long"/],
+    [() => jsonResponse({ error: "Validation failed" }, 400), /\(400\): "Validation failed"/],
+    [() => jsonResponse({ message: "Bad profile" }, 400), /\(400\): "Bad profile"/],
+  ]) {
+    const { edit } = editor(profileRoutes(() => PROFILE_BODY(), reply));
+    await assert.rejects(edit({ instructions: "x" }), re);
+    restore();
+  }
+});
+
+test("profile edit: a save with no reply may or may not be stored, a 2xx without JSON is saved — both reread the caches", async () => {
+  for (const [reply, applied] of [
+    [() => { throw new TypeError("fetch failed"); }, false],
+    [() => new Response("<html>502 Bad Gateway</html>", { status: 502 }), false],
+    [() => new Response(null, { status: 204 }), true],
+  ]) {
+    let saved = 0;
+    const { edit, saves } = editor(profileRoutes(() => PROFILE_BODY(), (req) => (req.url.includes("preview=true") ? { workflows: [] } : reply())), { onSaved: () => saved++ });
+    if (applied) assert.equal((await edit({ instructions: "x", apply: true })).applied, true);
+    else await assert.rejects(edit({ instructions: "x", apply: true }), /the save got no reply .* may or may not have been stored; preview again/);
+    assert.equal(saves().length, 1);
+    assert.equal(saved, 1);
+    restore();
+  }
+  // LoreMax's own 5xx is a definite failure: nothing to reread
+  let saved = 0;
+  const { edit } = editor(profileRoutes(() => PROFILE_BODY(), () => jsonResponse({ error: "Internal error" }, 500)), { onSaved: () => saved++ });
+  await assert.rejects(edit({ instructions: "x", apply: true }), (e) => e.status === 500 && !/may or may not/.test(e.message));
+  assert.equal(saved, 0);
+});
+
+test("profile edit: a profile LoreMax returns without its tools is refused, never saved with tools: []", async () => {
+  for (const got of [{}, { profile: { name: "Studio", description: "d", is_active: true } }, { profile: { name: "Studio", tools: null } }]) {
+    const { edit, puts } = editor(profileRoutes(() => got));
+    for (const apply of [false, true]) await assert.rejects(edit({ instructions: "x", apply }), /has no readable profile/);
+    assert.equal(puts().length, 0);
+    restore();
+  }
+});
+
+test("profile edit: is_active is sent as LoreMax has it, false included", async () => {
+  const body = PROFILE_BODY();
+  body.profile.is_active = false;
+  const { edit, saves } = editor(profileRoutes(() => structuredClone(body)));
+  await edit({ instructions: "x", apply: true });
+  assert.equal(saves()[0].json.is_active, false);
+});
+
+test("profile edit: a preview reads incompatible workflows from LoreMax's preview, else from the profile read", async () => {
+  const bad = { workflow_id: 12, compatible: false };
+  const { edit } = editor(profileRoutes(() => PROFILE_BODY(), () => ({ workflows: [bad], preview: {} })));
+  assert.deepEqual((await edit({ instructions: "x" })).incompatible, [bad]);
+  restore();
+
+  const body = PROFILE_BODY();
+  body.workflows = [bad];
+  const fallback = editor(profileRoutes(() => structuredClone(body), () => ({ preview: {} })));
+  assert.deepEqual((await fallback.edit({ instructions: "x" })).incompatible, [bad]);
+});
+
+test("profile edit: a new text holding [redacted] is refused, no PUT", async () => {
+  const body = PROFILE_BODY();
+  body.profile.tools[0].tool_description = "See https://cdn.test/a.png?[redacted]";
+  const { edit, puts } = editor(profileRoutes(() => structuredClone(body)));
+  // the redacted text copied into the new one, and a fresh text that holds it
+  for (const args of [
+    { tools: [{ tool: "styled_portrait", description: "See https://cdn.test/a.png?[redacted] — portraits only" }] },
+    { instructions: "Ref ?[redacted]" },
+  ]) {
+    for (const apply of [false, true]) {
+      await assert.rejects(edit({ ...args, apply }), (e) => /the new (tool:styled_portrait|description) contains "\[redacted\]"/.test(e.message) && /LoreMax → Organization → MCP/.test(e.message));
+    }
+  }
+  assert.equal(puts().length, 0);
+});
+
+test("profile edit: a tool name holding [redacted] is refused, no PUT", async () => {
+  const body = PROFILE_BODY();
+  body.profile.tools[0].tool_name = "portrait?[redacted]";
+  const { edit, puts } = editor(profileRoutes(() => structuredClone(body)));
+  await assert.rejects(edit({ instructions: "x" }), /tool name portrait\?\[redacted\] contains "\[redacted\]"/);
+  assert.equal(puts().length, 0);
+});
+
+test("profile edit: a long preview is cut after the verdict, never before it", async () => {
+  const body = PROFILE_BODY();
+  body.profile.tools = Array.from({ length: 6 }, (_, i) => ({ workflow_id: 100 + i, tool_name: `tool_${i}`, position: i, tool_description: "o".repeat(1500) }));
+  body.workflows = [{ workflow_id: 105, compatible: false }];
+  const f = mockFetch([["GET", SERVERS_RE, () => SERVERS], ...profileRoutes(() => structuredClone(body))]);
+  restore = f.restore;
+  const t = await tools(config({ allow_profile_edit: true }));
+  const args = { tools: body.profile.tools.map((x) => ({ tool: x.tool_name, description: "n".repeat(1500) })) };
+  const out = (await t.get("loremax_profile_edit").handler(args, CALL)).content[0].text;
+  assert.ok(out.endsWith("…(truncated)"));
+  const head = out.slice(0, out.indexOf('\n "changes": ['));
+  assert.match(head, /"incompatible": \[/);
+  assert.match(head, /LoreMax would refuse this save/);
+});
+
 test("profile edit: out of time before a request → the deadline error, nothing sent", async () => {
   const { f, edit } = editor(profileRoutes(() => PROFILE_BODY()));
   await assert.rejects(edit({ instructions: "x", apply: true }, { deadline: Date.now() - 1 }), (e) => e.deadline === true);

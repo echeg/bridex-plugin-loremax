@@ -295,7 +295,8 @@ then the shipped guide carries only `rules` and `recommended` is omitted from ev
      explicitly, defaults differ per workflow.
   4. Game assets (a sprite, a part, an icon): a transparent background where the workflow offers one, not a flat
      backdrop to cut out later.
-  5. Text inside the picture: only workflows whose guide says they render text.
+  5. Text inside the picture: only workflows whose description or guide says they render text (the description
+     too: until Task 7 fills the guide, no workflow has an entry).
   6. Preview at the cheapest duration/resolution, then commit the real settings with the same seed where the
      workflow takes one.
   7. Video is generated, not assembled: one take per scene, never a chain of short stubs glued together.

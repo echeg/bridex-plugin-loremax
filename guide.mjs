@@ -24,7 +24,7 @@ export const GUIDE = {
     "A character that must stay the same across images: make ONE base card at top quality, then vary it through references — never regenerate the character from a prompt each time.",
     "Aspect ratio follows the placement: 9:16 for stories/reels, 1:1 for avatars and grids, 16:9 for covers; set it explicitly, defaults differ per workflow.",
     "Game assets (a sprite, a part, an icon): a transparent background where the workflow offers one, not a flat backdrop to cut out later.",
-    "Text inside the picture: only workflows whose guide says they render text.",
+    "Text inside the picture: only workflows whose description or guide says they render text.",
     "Preview at the cheapest duration/resolution, then commit the real settings with the same seed where the workflow takes one.",
     "Video is generated, not assembled: one take per scene, never a chain of short stubs glued together.",
     "Look at what you made before handing it over (watch a clip with video_understand).",

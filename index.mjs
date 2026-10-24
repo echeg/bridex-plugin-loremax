@@ -81,7 +81,7 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 /** A profile's tools/list is reread after this long, or at once after one of the refresh codes. */
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
-/** Sent as clientInfo in the profile's initialize; kept equal to package.json's version (a test checks). */
+/** Sent as clientInfo in the profile's initialize; kept equal to package.json's and plugin.yaml's version (a test checks). */
 export const PLUGIN_VERSION = "0.3.0";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /**
@@ -162,18 +162,22 @@ function httpError(message, status, body) {
  * may-have-been-charged error (`ambiguous`), or `e` itself for a definite outcome.
  */
 function unanswered(e, what) {
-  let body;
-  try {
-    body = JSON.parse(e?.body ?? "");
-  } catch {}
-  const unknown = e?.status != null
-    ? e.status === 0 || (e.status >= 200 && e.status < 300) || (e.status >= 500 && (body == null || typeof body !== "object"))
-    : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
-  if (!unknown) return e;
+  if (!outcomeUnknown(e)) return e;
   return Object.assign(
     new Error(`loremax ${what} got no reply (${e?.message ?? e}) — LoreMax may have accepted and charged this generation; check its generation history before running it again`),
     { ambiguous: true },
   );
+}
+
+/** True when a request's error leaves its outcome unknown (see unanswered()). */
+function outcomeUnknown(e) {
+  let body;
+  try {
+    body = JSON.parse(e?.body ?? "");
+  } catch {}
+  return e?.status != null
+    ? e.status === 0 || (e.status >= 200 && e.status < 300) || (e.status >= 500 && (body == null || typeof body !== "object"))
+    : e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError;
 }
 
 /**
@@ -474,6 +478,8 @@ function profileTool(t, warn) {
 export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
   let cached = null;
   let loading = null;
+  // bumped by markStale(), as in createProfileInstructions
+  let epoch = 0;
   const warned = new Set();
   const warn = (k, msg) => {
     if (warned.has(k)) return;
@@ -520,13 +526,19 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
     if (!force && cached && now() - cached.fetchedAt < CATALOG_TTL_MS) return cached;
     if (deadline != null && deadline - now() <= 0) throw deadlineError("tools/list");
     if (!loading) {
-      loading = load().then(
-        (c) => ((cached = c), (loading = null), c),
+      const started = epoch;
+      const p = load().then(
+        (c) => {
+          if (started === epoch) cached = c;
+          if (loading === p) loading = null;
+          return c;
+        },
         (e) => {
-          loading = null;
+          if (loading === p) loading = null;
           throw e;
         },
       );
+      loading = p;
     }
     if (deadline == null) return loading;
     let timer;
@@ -536,8 +548,10 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
     return Promise.race([loading, late]).finally(() => clearTimeout(timer));
   }
 
-  /** The next get() rereads (after the profile itself was edited). */
+  /** The next get() rereads (after the profile itself was edited); a read already under way neither fills the cache nor serves later callers. */
   function markStale() {
+    epoch++;
+    loading = null;
     if (cached) cached = { ...cached, fetchedAt: -Infinity };
   }
 
@@ -627,10 +641,11 @@ export function createProfileInstructions(lmx, { now = Date.now, log } = {}) {
  * kept in memory. → profileManagementId({ deadline }) → number.
  */
 export function createProfileManagementId(lmx) {
-  const ids = new Map();
+  // profile_url is fixed for the client's life: one id
+  let id = null;
   return async function profileManagementId({ deadline } = {}) {
+    if (id != null) return id;
     const publicId = lmx.profilePath().slice("/api/mcp/s/".length);
-    if (ids.has(publicId)) return ids.get(publicId);
     const body = await lmx.restJson("/api/v2/mcp-servers", {}, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
     const found = (Array.isArray(body?.profiles) ? body.profiles : []).find((p) => isObj(p) && p.public_id === publicId && Number.isSafeInteger(p.id));
     if (!found) {
@@ -639,8 +654,8 @@ export function createProfileManagementId(lmx) {
         { code: "PROFILE_NOT_FOUND" },
       );
     }
-    ids.set(publicId, found.id);
-    return found.id;
+    id = found.id;
+    return id;
   };
 }
 
@@ -677,18 +692,16 @@ function profileEditRequest(args) {
  * LoreMax's profile (GET /api/v2/mcp-servers/<id>) + the request → the strict PUT
  * body (`{ name, description, is_active, tools: [{ workflow_id, tool_name,
  * tool_description }] }` in position order, bindings untouched) and the changes.
- * Refuses an unknown tool name and an unchanged text that holds REDACTED: sent
- * back, LoreMax would store the redaction in place of the real text.
+ * Refuses an unknown tool name and any text sent with REDACTED in it, changed or
+ * not: LoreMax would store the redaction in place of the real text.
  */
 function profileEditPlan(profile, req) {
   const fail = (why) => {
     throw new Error(`loremax_profile_edit: ${why}`);
   };
-  const bound = (Array.isArray(profile.tools) ? profile.tools : [])
-    .map((t, i) => ({ t, i }))
-    .sort((a, b) => (Number(a.t?.position) || 0) - (Number(b.t?.position) || 0) || a.i - b.i)
-    .map(({ t }) => t);
-  const names = bound.map((t) => t?.tool_name);
+  // sort is stable: tools at the same position keep LoreMax's order
+  const bound = [...profile.tools].sort((a, b) => (Number(a.position) || 0) - (Number(b.position) || 0));
+  const names = bound.map((t) => t.tool_name);
   for (const name of req.tools.keys()) {
     if (!names.includes(name)) fail(`no tool "${name.slice(0, 100)}" is bound to this profile — tools: ${names.length ? names.join(", ") : "(none)"}`);
   }
@@ -700,6 +713,8 @@ function profileEditPlan(profile, req) {
       unchanged.push([label, was]);
       return before;
     }
+    // usually the redacted `before` copied into the new text: the real query string would be lost all the same
+    if (wanted.includes(REDACTED)) fail(`the new ${label} contains "${REDACTED}" (LoreMax hides URL query strings when reading the profile) — saving would store it in place of the real URL; ${PROFILE_MCP_PAGE}`);
     changes.push({ field: label, before: was, after: wanted });
     return wanted;
   };
@@ -728,8 +743,8 @@ const incompatibleOf = (workflows) => (Array.isArray(workflows) ? workflows : []
  * tools' descriptions, never bindings, names or is_active. Preview (default):
  * PUT ?preview=true, nothing saved. Apply: the profile is read right before the
  * PUT, so the diff is against what LoreMax holds now (no ETag: an edit landing
- * between that read and the PUT is lost). `onSaved` runs after a save.
- * edit(args, { deadline }) → { applied, changes, incompatible?, hint }.
+ * between that read and the PUT is lost). `onSaved` runs after a save, and after
+ * one whose outcome is unknown. edit(args, { deadline }) → { applied, incompatible?, hint, changes }.
  */
 export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) {
   return async function edit(args, { deadline } = {}) {
@@ -760,7 +775,7 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
     }
     if (!isObj(got?.profile) || !Array.isArray(got.profile.tools)) throw new Error(`loremax_profile_edit: LoreMax's ${p} has no readable profile`);
     const { body, changes } = profileEditPlan(got.profile, req);
-    if (!changes.length) return { applied: false, changes, hint: "nothing to change: the profile already has these texts" };
+    if (!changes.length) return { applied: false, hint: "nothing to change: the profile already has these texts", changes };
     const put = (preview) => lmx.restJson(`${p}${preview ? "?preview=true" : ""}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -775,13 +790,14 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
         throw refused(e);
       }
       const incompatible = incompatibleOf(r?.workflows ?? got.workflows);
+      // before the changes, so cap() never cuts the verdict
       return {
         applied: false,
-        changes,
         incompatible,
         hint: incompatible.length
           ? `LoreMax would refuse this save: the profile binds incompatible workflows — ${PROFILE_MCP_PAGE}`
           : "nothing saved yet — show these changes, then call again with apply: true to save",
+        changes,
       };
     }
     // the read above is the fresh one: a save never goes ahead on a profile LoreMax already marks incompatible
@@ -792,14 +808,15 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
     try {
       await put(false);
     } catch (e) {
-      if (e?.deadline || e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError) {
+      // a 2xx whose body is not JSON (a 204) is a save all the same
+      if (!(e?.status >= 200 && e?.status < 300)) {
+        if (!e?.deadline && !outcomeUnknown(e)) throw refused(e);
         onSaved?.();
         throw new Error(`loremax_profile_edit: the save got no reply (${e?.message ?? e}) — it may or may not have been stored; preview again to see what LoreMax holds`);
       }
-      throw refused(e);
     }
     onSaved?.();
-    return { applied: true, changes, hint: "saved: every client of the profile sees the new texts" };
+    return { applied: true, hint: "saved: every client of the profile sees the new texts", changes };
   };
 }
 
@@ -836,7 +853,8 @@ function profileList(c, query, { guide, instructions = null } = {}) {
     ...(recommended.length ? { recommended } : {}),
     ...(rules ? { rules } : {}),
     tools,
-    hint: tools.length
+    // a query matching a route's task keeps its tools in recommended, even when no row matches
+    hint: tools.length || recommended.length
       ? `call loremax_workflows with tool to read its argument schema before loremax_generate. ${PROFILE_PRECEDENCE}`
       : q ? `no tool matches "${String(query).slice(0, 100)}" — call without query for the full list` : "this profile has no workflows — add some in LoreMax → Organization → MCP",
   };
@@ -1492,7 +1510,7 @@ function savedList(done) {
 /** A placeholder job row stands for a paid submission still under way: `submit:<uuid>`, never a generation. */
 const isSubmitRow = (externalId) => String(externalId ?? "").startsWith("submit:");
 
-/** `opts` is for tests only (the host passes just ctx): poll interval, clock and sleep. */
+/** `opts` is for tests only (the host passes just ctx): poll interval, clock, sleep and a guide replacing the shipped GUIDE. */
 export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, sleep = realSleep, guide = GUIDE } = {}) {
   const lmx = createClient(ctx, { now, sleep });
   const outputs = createOutputs(ctx, lmx);
@@ -1721,7 +1739,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           ...(recommended.length ? { recommended } : {}),
           ...(rules ? { rules } : {}),
           workflows,
-          hint: workflows.length
+          hint: workflows.length || recommended.length
             ? "call loremax_workflows with workflow_id to read its input fields and price before loremax_generate"
             : q ? `no workflow matches "${args.query}" — call without query for the full list` : "this organization has no workflows",
         }, null, 1)));

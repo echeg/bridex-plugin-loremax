@@ -7,7 +7,8 @@ import { GUIDE } from "../guide.mjs";
 import { guideKey, guideEntry, recommendedFrom } from "../index.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const KEY_RE = /^(id:\d+|(?!id:)\S+)$/;
+// exactly what guideKey() writes: "id:007" would never be found
+const KEY_RE = /^(id:(0|[1-9]\d*)|(?!id:)\S+)$/;
 
 // --- the shipped guide ---
 
@@ -152,6 +153,8 @@ test("recommendedFrom: an empty or malformed guide gives []", () => {
   assert.deepEqual(recommendedFrom(G, undefined), []);
 });
 
-test("recommendedFrom: the shipped guide over an empty catalog gives []", () => {
+test("recommendedFrom: the shipped guide over a catalog holding all its workflows recommends every route", () => {
+  const items = Object.keys(GUIDE.workflows).map((k) => (/^id:\d+$/.test(k) ? { workflowId: Number(k.slice(3)) } : { visualId: k }));
+  assert.deepEqual(recommendedFrom(GUIDE, items).map((r) => r.task), GUIDE.routes.map((r) => r.task));
   assert.deepEqual(recommendedFrom(GUIDE, []), []);
 });

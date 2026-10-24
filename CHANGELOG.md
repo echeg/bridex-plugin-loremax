@@ -21,8 +21,9 @@ texts.
   fourth tool that rewrites the profile's description and its bound tools' descriptions in LoreMax — for every
   client of the profile — never bindings, tool names or activation. `apply: false` (default) previews through
   LoreMax and returns `changes: [{ field, before, after }]`; `apply: true` rereads the profile and saves. It refuses,
-  before saving, an unknown tool name, a text over 2000 characters, an unchanged text holding `[redacted]` and a
-  profile with incompatible workflows. After a save the tool list and the instructions are reread.
+  before saving, an unknown tool name, a text over 2000 characters, any text sent with `[redacted]` in it (unchanged,
+  or copied into a new text) and a profile with incompatible workflows. After a save the tool list and the
+  instructions are reread.
 - Generation, uploads, results, the watcher and the health check make the same requests as in 0.2.1.
 
 Upgrading from 0.2.1: nothing to change. Agent prompts may start from `recommended`; set `allow_profile_edit: true`

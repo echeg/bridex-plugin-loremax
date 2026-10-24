@@ -217,6 +217,32 @@ test("catalog: a refresh picks up a new revision", async () => {
   assert.equal((await catalog.get()).tools.get("t").revision, "rev-2");
 });
 
+test("catalog: a read under way when markStale() runs neither fills the cache nor serves later callers", async () => {
+  let rev = "rev-1";
+  const gates = [];
+  const f = mockFetch([["POST", `/api/mcp/s/${PROFILE}`, async (req) => {
+    const r = rev;
+    await new Promise((resolve) => gates.push(resolve));
+    return jsonResponse({ jsonrpc: "2.0", id: req.json.id, result: { tools: [{ name: "t", inputSchema: { type: "object", properties: { schema_revision: { enum: [r] } } } }] } });
+  }]]);
+  restore = f.restore;
+  const { ctx } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, profile_url: PROFILE } });
+  const catalog = createProfileCatalog(createClient(ctx), { log: ctx.log });
+  const early = catalog.get();
+  await new Promise((r) => setImmediate(r));
+  // the profile is saved while that read is still out
+  rev = "rev-2";
+  catalog.markStale();
+  const late = catalog.get();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(gates.length, 2);
+  for (const open of gates) open();
+  assert.equal((await early).tools.get("t").revision, "rev-1");
+  assert.equal((await late).tools.get("t").revision, "rev-2");
+  assert.equal((await catalog.get()).tools.get("t").revision, "rev-2");
+  assert.equal(f.calls.length, 2);
+});
+
 test("catalog: malformed entries are skipped, never thrown", async () => {
   const junk = [
     null,
