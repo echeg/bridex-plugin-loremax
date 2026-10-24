@@ -214,27 +214,31 @@
 - [x] run tests - must pass before task 6
 
 ### Task 6: `loremax_profile_edit` — preview and apply
-- [ ] args: `instructions?: string | null` (profile description; omitted = unchanged; `null` or `""` clears),
+- [x] args: `instructions?: string | null` (profile description; omitted = unchanged; `null` or `""` clears),
   `tools?: [{ tool, description: string | null }]` (by current tool name), `apply?: boolean` (default false); the
   tool description says it changes what every client of the profile sees and that a preview comes first
-- [ ] validate before any request: at least one change requested, each text ≤ 2000 chars; after the `GET`, every
+- [x] validate before any request: at least one change requested, each text ≤ 2000 chars; after the `GET`, every
   `tool` names a bound tool (an unknown name lists the bound ones)
-- [ ] build the strict `PUT` body from `GET /api/v2/mcp-servers/<id>`: `{ name, description, is_active, tools:
+- [x] build the strict `PUT` body from `GET /api/v2/mcp-servers/<id>`: `{ name, description, is_active, tools:
   [{ workflow_id, tool_name, tool_description }] }` in position order, only the requested texts changed; refuse when
   any field that would be sent unchanged contains `[redacted]` (name the field; tell the agent a person must fix it
   in LoreMax → Organization → MCP); no changes → "nothing to change", no `PUT`
-- [ ] `apply: false`: `PUT …?preview=true`, return `{ applied: false, changes, incompatible, hint: "call again with
+- [x] `apply: false`: `PUT …?preview=true`, return `{ applied: false, changes, incompatible, hint: "call again with
   apply: true to save" }`; `incompatible` lists workflows with `compatible: false` (refuse to suggest applying when
   non-empty)
-- [ ] `apply: true`: a fresh `GET` right before the `PUT` (diff recomputed against it), `PUT` without preview; a
+- [x] `apply: true`: a fresh `GET` right before the `PUT` (diff recomputed against it), `PUT` without preview; a
   400 surfaces LoreMax's `issues` / incompatible `workflows`; on success return `{ applied: true, changes }` and mark
   the catalog stale and `invalidate()` the instructions; the whole call stays within the 50 s budget
-- [ ] write tests: preview sends `?preview=true` and the strict body (no `position`, bindings and `is_active`
+- [x] write tests: preview sends `?preview=true` and the strict body (no `position`, bindings and `is_active`
   unchanged, order kept); apply does a fresh GET and keeps a description changed in LoreMax between preview and
   apply; refusals (no change requested, > 2000 chars, unknown tool, unchanged `[redacted]`, incompatible workflow)
   send no `PUT`; clearing with `null` and `""`; 400 and 404 errors; the catalog and instructions are reread after a
   save
-- [ ] run tests - must pass before task 7
+- [x] ➕ `createProfileCatalog` gains `markStale()` (the save marks the catalog stale; `refreshAfter` uses it)
+- [x] ➕ a cleared text is sent as `""` (shown as `""` in `changes`; LoreMax's `null` counts as empty); an apply whose
+  fresh `GET` already lists an incompatible workflow is refused without a `PUT`; a save that gets no reply says it
+  may or may not have been stored and still marks the caches stale
+- [x] run tests - must pass before task 7
 
 ### Task 7: Fill the guide from the catalog export
 - [ ] read the export from `$LOREMAX_CATALOG_EXPORT`, else `docs/catalog/loremax-workflows.json`; if neither

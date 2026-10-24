@@ -90,6 +90,11 @@ const STANDARD_INSTRUCTION_PREFIXES = [
   "An api_key argument must belong",
   "Media arguments take finalized organization URLs",
 ];
+/** LoreMax's limit on a profile's description and each tool_description. */
+const PROFILE_TEXT_MAX = 2000;
+/** LoreMax hands names and descriptions back with URL query strings replaced by this: sent back, it would overwrite the real text. */
+const REDACTED = "[redacted]";
+const PROFILE_MCP_PAGE = "a person must fix it in LoreMax → Organization → MCP";
 /** Profile tools that are never generations, whatever their schema says. */
 const PROFILE_SERVICE_TOOLS = new Set(["get_balance", "check_generation", "request_upload_url", "finalize_upload", "upload_from_url"]);
 /** Arguments the plugin fills in itself: the agent never sees them in a tool's schema. */
@@ -523,14 +528,19 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
     return Promise.race([loading, late]).finally(() => clearTimeout(timer));
   }
 
+  /** The next get() rereads (after the profile itself was edited). */
+  function markStale() {
+    if (cached) cached = { ...cached, fetchedAt: -Infinity };
+  }
+
   /** Marks the cache stale when `err` says the catalog changed; true if it did. */
   function refreshAfter(err) {
     if (!CATALOG_REFRESH_CODES.has(err?.code)) return false;
-    if (cached) cached = { ...cached, fetchedAt: -Infinity };
+    markStale();
     return true;
   }
 
-  return { get, refreshAfter };
+  return { get, refreshAfter, markStale };
 }
 
 /** A profile's initialize instructions → the studio's own text (LoreMax's standard lines dropped), or null if none is left. */
@@ -623,6 +633,165 @@ export function createProfileManagementId(lmx) {
     }
     ids.set(publicId, found.id);
     return found.id;
+  };
+}
+
+/**
+ * The agent's edit request → { description?: string, tools: Map name → string },
+ * checked before any request: something to change, each text a string (null or ""
+ * clears it, sent as "") of at most PROFILE_TEXT_MAX chars, a tool named once.
+ */
+function profileEditRequest(args) {
+  const fail = (why) => {
+    throw new Error(`loremax_profile_edit: ${why}`);
+  };
+  const textOf = (v, field) => {
+    if (v == null) return "";
+    if (typeof v !== "string") fail(`${field} must be a string, or null to clear it`);
+    if (v.length > PROFILE_TEXT_MAX) fail(`${field} is ${v.length} characters — LoreMax takes at most ${PROFILE_TEXT_MAX}`);
+    return v;
+  };
+  const out = { tools: new Map() };
+  if (args.instructions !== undefined) out.description = textOf(args.instructions, "instructions");
+  if (args.tools != null && !Array.isArray(args.tools)) fail("tools must be a list of { tool, description }");
+  for (const t of args.tools ?? []) {
+    const name = isObj(t) && typeof t.tool === "string" ? t.tool.trim() : "";
+    if (!name) fail("every tools[] entry needs the tool's current name in `tool`");
+    if (out.tools.has(name)) fail(`tool "${name.slice(0, 100)}" is listed twice`);
+    if (!isObj(t) || !("description" in t)) fail(`tools[] entry "${name.slice(0, 100)}" needs a description (null clears it)`);
+    out.tools.set(name, textOf(t.description, `the description of "${name.slice(0, 100)}"`));
+  }
+  if (out.description === undefined && !out.tools.size) fail("nothing requested — pass instructions and/or tools");
+  return out;
+}
+
+/**
+ * LoreMax's profile (GET /api/v2/mcp-servers/<id>) + the request → the strict PUT
+ * body (`{ name, description, is_active, tools: [{ workflow_id, tool_name,
+ * tool_description }] }` in position order, bindings untouched) and the changes.
+ * Refuses an unknown tool name and an unchanged text that holds REDACTED: sent
+ * back, LoreMax would store the redaction in place of the real text.
+ */
+function profileEditPlan(profile, req) {
+  const fail = (why) => {
+    throw new Error(`loremax_profile_edit: ${why}`);
+  };
+  const bound = (Array.isArray(profile.tools) ? profile.tools : [])
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => (Number(a.t?.position) || 0) - (Number(b.t?.position) || 0) || a.i - b.i)
+    .map(({ t }) => t);
+  const names = bound.map((t) => t?.tool_name);
+  for (const name of req.tools.keys()) {
+    if (!names.includes(name)) fail(`no tool "${name.slice(0, 100)}" is bound to this profile — tools: ${names.length ? names.join(", ") : "(none)"}`);
+  }
+  const changes = [];
+  const unchanged = [];
+  const field = (label, before, wanted) => {
+    const was = before ?? "";
+    if (wanted === undefined || wanted === was) {
+      unchanged.push([label, was]);
+      return before;
+    }
+    changes.push({ field: label, before: was, after: wanted });
+    return wanted;
+  };
+  unchanged.push(["name", profile.name ?? ""]);
+  const body = {
+    name: profile.name,
+    description: field("description", profile.description, req.description),
+    is_active: profile.is_active,
+    tools: bound.map((t) => {
+      unchanged.push([`tool name ${t.tool_name}`, t.tool_name ?? ""]);
+      return { workflow_id: t.workflow_id, tool_name: t.tool_name, tool_description: field(`tool:${t.tool_name}`, t.tool_description, req.tools.get(t.tool_name)) };
+    }),
+  };
+  if (changes.length) {
+    const hit = unchanged.find(([, v]) => String(v).includes(REDACTED));
+    if (hit) fail(`the profile's ${hit[0]} contains "${REDACTED}" (LoreMax hides URL query strings when reading it) — saving would overwrite the real text; ${PROFILE_MCP_PAGE}`);
+  }
+  return { body, changes };
+}
+
+/** A LoreMax workflows[] list → the ones it marks compatible: false. */
+const incompatibleOf = (workflows) => (Array.isArray(workflows) ? workflows : []).filter((w) => isObj(w) && w.compatible === false);
+
+/**
+ * loremax_profile_edit's core: rewrites the profile's description and its bound
+ * tools' descriptions, never bindings, names or is_active. Preview (default):
+ * PUT ?preview=true, nothing saved. Apply: the profile is read right before the
+ * PUT, so the diff is against what LoreMax holds now (no ETag: an edit landing
+ * between that read and the PUT is lost). `onSaved` runs after a save.
+ * edit(args, { deadline }) → { applied, changes, incompatible?, hint }.
+ */
+export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) {
+  return async function edit(args, { deadline } = {}) {
+    const req = profileEditRequest(isObj(args) ? args : {});
+    const apply = args?.apply === true;
+    const id = await profileManagementId({ deadline });
+    const p = `/api/v2/mcp-servers/${id}`;
+    const refused = (e) => {
+      if (e?.status === 404) {
+        return Object.assign(new Error(`loremax_profile_edit: LoreMax has no profile ${id} any more — it was deleted, or LOREMAX_API_KEY belongs to another organization; ${PROFILE_HINT}`), { code: "PROFILE_NOT_FOUND" });
+      }
+      if (e?.status === 400) {
+        let b = null;
+        try {
+          b = JSON.parse(e.body);
+        } catch {}
+        const issues = b?.issues ?? b?.error ?? b?.message ?? String(e.body ?? "").slice(0, 400);
+        const bad = incompatibleOf(b?.workflows);
+        return new Error(`loremax_profile_edit: LoreMax refused the profile (400): ${JSON.stringify(issues).slice(0, 600)}${bad.length ? ` — incompatible workflows: ${JSON.stringify(bad).slice(0, 600)}` : ""}`);
+      }
+      return e;
+    };
+    let got;
+    try {
+      got = await lmx.restJson(p, {}, { timeoutMs: LOOKUP_TIMEOUT_MS, deadline });
+    } catch (e) {
+      throw refused(e);
+    }
+    if (!isObj(got?.profile) || !Array.isArray(got.profile.tools)) throw new Error(`loremax_profile_edit: LoreMax's ${p} has no readable profile`);
+    const { body, changes } = profileEditPlan(got.profile, req);
+    if (!changes.length) return { applied: false, changes, hint: "nothing to change: the profile already has these texts" };
+    const put = (preview) => lmx.restJson(`${p}${preview ? "?preview=true" : ""}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }, { timeoutMs: LOOKUP_TIMEOUT_MS * 3, deadline });
+
+    if (!apply) {
+      let r;
+      try {
+        r = await put(true);
+      } catch (e) {
+        throw refused(e);
+      }
+      const incompatible = incompatibleOf(r?.workflows ?? got.workflows);
+      return {
+        applied: false,
+        changes,
+        incompatible,
+        hint: incompatible.length
+          ? `LoreMax would refuse this save: the profile binds incompatible workflows — ${PROFILE_MCP_PAGE}`
+          : "nothing saved yet — show these changes, then call again with apply: true to save",
+      };
+    }
+    // the read above is the fresh one: a save never goes ahead on a profile LoreMax already marks incompatible
+    const incompatible = incompatibleOf(got.workflows);
+    if (incompatible.length) {
+      throw new Error(`loremax_profile_edit: not saved — the profile binds incompatible workflows (${JSON.stringify(incompatible).slice(0, 600)}); ${PROFILE_MCP_PAGE}`);
+    }
+    try {
+      await put(false);
+    } catch (e) {
+      if (e?.deadline || e?.name === "TimeoutError" || e?.name === "AbortError" || e instanceof TypeError) {
+        onSaved?.();
+        throw new Error(`loremax_profile_edit: the save got no reply (${e?.message ?? e}) — it may or may not have been stored; preview again to see what LoreMax holds`);
+      }
+      throw refused(e);
+    }
+    onSaved?.();
+    return { applied: true, changes, hint: "saved: every client of the profile sees the new texts" };
   };
 }
 
@@ -2151,16 +2320,28 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * config error like every other tool.
    */
   if (profile && lmx.allowProfileEdit()) {
-    const profileManagementId = createProfileManagementId(lmx);
+    const edit = createProfileEditor(lmx, {
+      profileManagementId: createProfileManagementId(lmx),
+      onSaved: () => {
+        catalog?.markStale();
+        instructions?.invalidate();
+      },
+    });
     registerTool({
       name: "loremax_profile_edit",
       description:
-        "Edit this LoreMax MCP profile's texts: the profile description and the descriptions of its tools. Changes what EVERY client of the profile sees.",
-      schema: {},
-      handler: async () => {
+        `Edit this LoreMax MCP profile's texts: the profile description (the studio's instructions) and the descriptions of its bound tools — never which tools are bound, their names or whether the profile is active. Changes what EVERY client of the profile sees. Always preview first (apply false, the default: nothing is saved) and show the changes; then call again with apply: true to save. Each text is at most ${PROFILE_TEXT_MAX} characters; null or "" clears it.`,
+      schema: {
+        instructions: z.string().max(PROFILE_TEXT_MAX).nullable().optional().describe("the profile description; omit to keep it, null or \"\" clears it"),
+        tools: z.array(z.object({
+          tool: z.string().describe("the tool's current name, as loremax_workflows lists it"),
+          description: z.string().max(PROFILE_TEXT_MAX).nullable().describe("its new description; null or \"\" clears it"),
+        })).optional().describe("tool descriptions to change"),
+        apply: z.boolean().optional().describe("true saves; default false previews without saving"),
+      },
+      handler: async (args) => {
         const deadline = now() + MAX_WAIT_S * 1000;
-        const id = await profileManagementId({ deadline });
-        return text(JSON.stringify({ profile_id: id }, null, 1));
+        return text(cap(JSON.stringify(await edit(args, { deadline }), null, 1)));
       },
     });
   }
