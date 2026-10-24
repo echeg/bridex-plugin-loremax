@@ -241,17 +241,22 @@
 - [x] run tests - must pass before task 7
 
 ### Task 7: Fill the guide from the catalog export
-- [ ] read the export from `$LOREMAX_CATALOG_EXPORT`, else `docs/catalog/loremax-workflows.json`; if neither
+⚠️ Blocked: the catalog export is missing. Re-run this task after producing it (see Post-Completion); until
+then the shipped guide carries only `rules` and `recommended` is omitted from every reply.
+- [x] read the export from `$LOREMAX_CATALOG_EXPORT`, else `docs/catalog/loremax-workflows.json`; if neither
   exists, mark this task ⚠️ blocked ("catalog export missing — see Post-Completion") and stop: never invent
-  workflows
-- [ ] fill `GUIDE.workflows` for the workflows worth recommending: `use_for` (one line), `knobs` (the inputs that
-  matter), `caveats` (what goes wrong); keys are visual ids, else `id:<n>`
-- [ ] fill `GUIDE.routes` for the tasks in Technical Details, each with picks in priority order, best first;
-  cheap or draft workflows are never the first pick
-- [ ] carry the media-generation caveats over to the matching workflows (e.g. a real-looking face refused as a
-  frame or reference by some video models; no transparent background on cheap image models)
-- [ ] no organization-specific names, provider URLs, prices or internal settings in `guide.mjs` (public repository)
-- [ ] run tests (the integrity test now checks every key against the export) - must pass before task 8
+  workflows (⚠️ blocked - catalog export missing — see Post-Completion: `LOREMAX_CATALOG_EXPORT` unset, no
+  `docs/catalog/loremax-workflows.json` in the worktree or the main checkout)
+- [x] fill `GUIDE.workflows` for the workflows worth recommending: `use_for` (one line), `knobs` (the inputs that
+  matter), `caveats` (what goes wrong); keys are visual ids, else `id:<n>` (⚠️ blocked - catalog export missing — see Post-Completion; `GUIDE.workflows` / `routes` stay empty, nothing invented)
+- [x] fill `GUIDE.routes` for the tasks in Technical Details, each with picks in priority order, best first;
+  cheap or draft workflows are never the first pick (⚠️ blocked - catalog export missing — see Post-Completion; `GUIDE.workflows` / `routes` stay empty, nothing invented)
+- [x] carry the media-generation caveats over to the matching workflows (e.g. a real-looking face refused as a
+  frame or reference by some video models; no transparent background on cheap image models) (⚠️ blocked - catalog export missing — see Post-Completion; `GUIDE.workflows` / `routes` stay empty, nothing invented)
+- [x] no organization-specific names, provider URLs, prices or internal settings in `guide.mjs` (public repository)
+  (holds: `guide.mjs` has only the model-agnostic `rules`)
+- [x] run tests (the integrity test now checks every key against the export) - must pass before task 8
+  (318 pass, 1 skipped: the export check, skipped while the export is missing)
 
 ### Task 8: Verify acceptance criteria
 - [ ] verify all requirements from Overview are implemented
