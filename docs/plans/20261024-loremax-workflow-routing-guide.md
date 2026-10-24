@@ -259,12 +259,16 @@ then the shipped guide carries only `rules` and `recommended` is omitted from ev
   (318 pass, 1 skipped: the export check, skipped while the export is missing)
 
 ### Task 8: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify edge cases are handled (empty guide, no live picks, `initialize` failure, invalid `profile_url` with
-  the flag on, edit refusals)
-- [ ] run full test suite (`npm test`)
-- [ ] verify generation, uploads, results, the watcher and the health check make the same requests as before
-  (no `initialize`, no `/api/v2/mcp-servers`)
+- [x] verify all requirements from Overview are implemented (REST `recommended`/`rules`/`guide`, profile
+  `instructions`/`recommended`/`use_for`/`guide`, `loremax_profile_edit` behind `allow_profile_edit`; `recommended`
+  stays empty until Task 7's export exists)
+- [x] verify edge cases are handled (empty guide, no live picks, `initialize` failure, invalid `profile_url` with
+  the flag on, edit refusals) (each covered by an existing test in `workflows`, `guide`, `profile-edit` tests)
+- [x] run full test suite (`npm test`) (320 tests: 319 pass, 1 skipped — the export check)
+- [x] verify generation, uploads, results, the watcher and the health check make the same requests as before
+  (no `initialize`, no `/api/v2/mcp-servers`) (`initialize` is sent only from the profile list, the management API
+  only from the edit tool; ➕ a regression test in `test/generate.test.mjs` runs all five paths in profile mode with
+  `allow_profile_edit: true`)
 
 ### Task 9: [Final] Update documentation
 - [ ] `README.md`: the guide (what the agent sees in each mode, the precedence rule, how to update it from an

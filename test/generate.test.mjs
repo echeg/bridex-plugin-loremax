@@ -768,12 +768,13 @@ const refusal = (error, errorCode, details) => ({ isError: { error, ...(errorCod
  * Profile mode on the fake clock. The profile answers tools/list with `tools()`, the upload
  * tools with tickets (PUT to r2.test) and `https://cdn.test/<asset>`, and a generation tool
  * with `gen(name, args)`: plain data, `refusal(…)`, or `{ rpcError }` (a JSON-RPC error); a
- * throw drops the connection. `onPost(req)` may answer a whole POST, `onPut(req)` a PUT.
+ * throw drops the connection. `onPost(req)` may answer a whole POST, `onPut(req)` a PUT;
+ * `config` adds to the plugin's config.
  */
-const profileSetup = async ({ gen = () => ({}), tools = () => structuredClone(FIXTURE.result.tools), onPost, onPut, routes = [], patch, tick = 1_000 } = {}) => {
+const profileSetup = async ({ gen = () => ({}), tools = () => structuredClone(FIXTURE.result.tools), onPost, onPut, routes = [], patch, tick = 1_000, config = {} } = {}) => {
   // the upload cache is process-wide: every test starts cold
   globalThis[Symbol.for("bridex.loremax.uploads")]?.clear();
-  const s = await setup({ config: { profile_url: PROFILE }, tick, patch });
+  const s = await setup({ config: { profile_url: PROFILE, ...config }, tick, patch });
   let tickets = 0;
   const reply = async (m) => {
     const head = { jsonrpc: "2.0", id: m.id };
@@ -951,6 +952,36 @@ test("profile: a pending reply, or a completed pipeline reply without URLs, is t
     assert.equal(s.rec.usage[0].ref, "501");
     restore();
   }
+});
+
+test("profile with allow_profile_edit: generation, uploads, the watcher, loremax_result and the check send no initialize and never touch /api/v2/mcp-servers", async () => {
+  let done = false;
+  const s = await profileSetup({
+    config: { allow_profile_edit: true },
+    gen: (name) => (name === "get_balance" ? { limit: 1000, used: 250, remaining: 750 } : { generationId: 501, status: "pending", tokensCost: 12, async: true, jobId: "j" }),
+    routes: [
+      ["POST", "/api/v2/generations/501/check", () => (done ? DONE : { status: "checking" })],
+      ["GET", `${CDN}/out.png`, () => new Response("PNG", { headers: { "content-type": "image/png" } })],
+    ],
+  });
+  assert.ok(s.rec.tools.has("loremax_profile_edit"));
+  s.write("a.png", "A");
+  const r = await s.run({ tool: "styled_portrait", arguments: { style: "noir", references: ["a.png"] }, wait_s: 2 });
+  assert.notEqual(r.status, "completed");
+  assert.equal(s.gens()[0].status, "running");
+
+  done = true;
+  await s.watchOnce();
+  assert.equal(s.gens()[0].status, "succeeded");
+  const result = JSON.parse((await s.rec.tools.get("loremax_result").handler({ generation_id: "501" }, CALL)).content[0].text);
+  assert.equal(result.status, "completed");
+  assert.equal((await s.rec.checks[0]()).ok, true);
+  await s.rec.stats[0]();
+
+  assert.ok(s.msgs().some((m) => m.params?.name === "request_upload_url"));
+  assert.ok(s.msgs().some((m) => m.params?.name === "get_balance"));
+  assert.ok(s.msgs().every((m) => m.method !== "initialize"));
+  assert.ok(s.f.calls.every((c) => !c.url.includes("/api/v2/mcp-servers")));
 });
 
 /** After a call that produced no generation: nothing billed, nothing tracked, the placeholder settled failed. */
