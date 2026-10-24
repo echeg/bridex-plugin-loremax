@@ -78,7 +78,7 @@ export const GUIDE = {
       caveats: "the output is a raster in vector style: run i2i_vectorize on it for a real SVG",
     },
     "Text2Image_NanoBanana_v2": {
-      use_for: "fast drafts, storyboards, many quick variations",
+      use_for: "fast, reliable drafts, storyboards and volume work",
       knobs: "resolution 0.5K–4K; aspect_ratio",
       caveats: "draft tier: only when someone asked for cheap or fast; no transparent background",
     },
@@ -92,6 +92,16 @@ export const GUIDE = {
       use_for: "edit or vary an image by instruction, the rest stays intact",
       knobs: "model Flare or Sunburst; quality; background transparent; image_size",
       caveats: "say what must not change; vary the same base card each time, not the previous variation",
+    },
+    "Image2Image_NanoBanana_Edit_v2": {
+      use_for: "fast, reliable edits and variations from reference images, up to 4K",
+      knobs: "resolution 0.5K–4K (default 1K); aspect_ratio auto or 21:9…9:16",
+      caveats: "no transparent background",
+    },
+    "Loremax_Image_Scene_builder": {
+      use_for: "compose a scene from several references with a chosen image model",
+      knobs: "alternative_model (GPT Image 2.5, NanoBanana Pro or 2, Seedream 5 Pro…); model_gpt Flare/Sunburst; quality; aspect_ratio",
+      caveats: "takes a structured prompt (Prompt Editor V2): read its input fields first; a profile cannot hold it, so REST mode only",
     },
     "i2i_flux_3_image": {
       use_for: "local edits and variations from up to 10 references, identity kept",
@@ -149,7 +159,7 @@ export const GUIDE = {
     "i2v_seedance_25": {
       use_for: "animate a still or a first+last frame: one take up to 30 s, with sound",
       knobs: "duration 4–30; resolution 480p (draft) / 720p / 1080p; generate_audio; seed",
-      caveats: "a real-looking face as the frame can be refused: for photoreal people use the UGC reference workflow, Kling or Gemini Omni",
+      caveats: "refusals are common, mostly real-looking faces as the frame: for photoreal people use the UGC reference workflow; check every result",
     },
     "t2v_seedance_25": {
       use_for: "text to one continuous take up to 30 s with lip-synced audio",
@@ -164,6 +174,15 @@ export const GUIDE = {
     "r2v_seedance_25-copy-1787570239620-fysq": {
       use_for: "reference video with photoreal people: faces hold in close-ups",
       knobs: "duration 4–30; resolution; aspect_ratio; generate_audio; seed",
+    },
+    "i2v_wan_27": {
+      use_for: "dependable image to video, scene kept faithfully, up to 15 s",
+      knobs: "resolution 720p/1080p; duration 2–15",
+      caveats: "no audio setting: add sound separately when the clip needs it",
+    },
+    "i2v_grok_imagine_video": {
+      use_for: "quick, dependable clips from an image, 1–15 s",
+      knobs: "model_type; duration 1–15; resolution 480p/720p; aspect_ratio",
     },
     "i2v_kling_v3": {
       use_for: "image to video with strong motion and camera work, up to 15 s",
@@ -215,6 +234,11 @@ export const GUIDE = {
       caveats: "draft tier: only when someone asked for cheap or fast",
     },
     // --- video: editing and processing ---
+    "a2a_sync_lipsync_api": {
+      use_for: "lip-sync a video to new audio, choice of sync models",
+      knobs: "model_type (sync-3, lipsync-2-pro, react-1 with emotion_prompt…); sync_mode for when audio and video lengths differ",
+      caveats: "fails often: watch every result before handing it over (failed runs are refunded)",
+    },
     "a2a_sync_lipsync_v3_dubbing": {
       use_for: "re-sync mouths in an existing video to new speech or a dub",
       knobs: "target_lang",
@@ -234,6 +258,18 @@ export const GUIDE = {
     "v2v_kling_o3": {
       use_for: "restyle a video keeping its motion; images guide the design",
       knobs: "model_type; duration; keep_audio; aspect_ratio",
+    },
+    "video2video_gemini_omni": {
+      use_for: "edit a video with Gemini Omni",
+      caveats: "fails very often: prefer v2v_seedance_2.5 or video2video_flux_3_edit",
+    },
+    "image2video_seedance_2": {
+      use_for: "older Seedance 2 image to video",
+      caveats: "fails often: prefer i2v_seedance_25",
+    },
+    "reference2video_seedance_2": {
+      use_for: "older Seedance 2 reference video",
+      caveats: "fails very often: prefer r2v_seedance_25",
     },
     "video2video_flux_3": {
       use_for: "continue a clip by 5–20 s, matching motion, light and framing",
@@ -301,7 +337,7 @@ export const GUIDE = {
     { task: "image: key art, illustration, ad creative", pick: ["t2i_gpt_image_2.5", "Text2Image_NanoBanana_2"] },
     { task: "image: text inside the picture (poster, packaging, UI)", pick: ["t2i_gpt_image_2.5", "Text2Image_SeeDream_5_pro"] },
     { task: "image: game asset or icon, transparent background", pick: ["t2i_gpt_image_2.5", "Rembg_bria"] },
-    { task: "image: variations of a character or product", pick: ["i2i_gpt_image_2.5", "i2i_flux_3_image"] },
+    { task: "image: variations of a character or product", pick: ["i2i_gpt_image_2.5", "Image2Image_NanoBanana_Edit_v2"] },
     { task: "image: the same subject from another angle", pick: ["i2i_qwen-image-edit-2511-multiple-angles"] },
     { task: "image: photoreal product or lifestyle shot", pick: ["t2i_flux_2_max", "i2i_qwen-image-edit-fusion"] },
     { task: "image: casual mobile-game art, 3D mascots", pick: ["Text2Image_Loremax_Casual_Art"] },
@@ -309,18 +345,18 @@ export const GUIDE = {
     { task: "image: edit one thing, keep the rest", pick: ["i2i_gpt_image_2.5", "Image2Image_SeeDream_5_pro_edit"] },
     { task: "image: remove background, split into layers", pick: ["Rembg_bria", "Image2Image_SeeDream_5_layerize"] },
     { task: "image: upscale", pick: ["Image2Image_topaz_upscale_wonder_35", "Image2Image_topaz_upscale_transparent"] },
-    { task: "video: from an image or first frame, one take", pick: ["i2v_seedance_25", "i2v_kling_v3"] },
+    { task: "video: from an image or first frame, one take", pick: ["i2v_seedance_25", "i2v_wan_27", "i2v_kling_v3"] },
     { task: "video: from text", pick: ["t2v_seedance_25", "t2v_kling_v3"] },
     { task: "video: fixed cast or set across a series", pick: ["r2v_seedance_25", "r2v_wan_3"] },
     { task: "video: photoreal people and faces", pick: ["r2v_seedance_25-copy-1787570239620-fysq", "img2video_gemini_omni"] },
     { task: "video: motion copied from a reference video", pick: ["v2v_kling_3_motion_control"] },
     { task: "video: from a start frame to an end frame", pick: ["image2video_seedance_2_start_end_frame", "i2v_kling_o3-start_end_frame"] },
-    { task: "video: talking avatar from a portrait", pick: ["pruna_p-video-2-pro-avatar", "heygen_avatar_4_video"] },
-    { task: "video: lip-sync or dub a video", pick: ["a2a_sync_lipsync_v3_dubbing", "a2a_elevenlabs_dubbing"] },
+    { task: "video: talking avatar from a portrait", pick: ["heygen_avatar_4_video", "pruna_p-video-2-pro-avatar"] },
+    { task: "video: lip-sync or dub a video", pick: ["a2a_sync_lipsync_api", "a2a_elevenlabs_dubbing"] },
     { task: "video: edit or restyle a video", pick: ["v2v_seedance_2.5", "video2video_flux_3_edit"] },
     { task: "video: extend or upscale a video", pick: ["video2video_flux_3", "v2v_topaz_labs_video_upscale_astra"] },
     { task: "video: remove background, erase objects", pick: ["v2v_video_veed_background_removal", "v2v_bria_erase_prompt"] },
-    { task: "audio: voiceover, text to speech", pick: ["t2a_gemini_38_flash_tts", "t2a_elevenlabs_tts_multilingual_v2"] },
+    { task: "audio: voiceover, text to speech", pick: ["t2a_elevenlabs_tts_multilingual_v2", "t2a_gemini_38_flash_tts"] },
     { task: "audio: dialogue, or a cloned voice", pick: ["t2a_elevenlabs_text-to-dialogue_eleven-v3_api", "ref2audio_seed_audio_1"] },
     { task: "audio: song or soundtrack", pick: ["t2a_suno_create_music"] },
     { task: "audio: sound effects or loops", pick: ["t2a_elevenlabs_sounds", "t2a_suno_create_sound"] },

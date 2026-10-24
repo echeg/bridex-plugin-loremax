@@ -189,6 +189,10 @@ go over its size cap, `guide` is dropped first; the schema is never cut.
 workflows available to all organizations, from a read-only script in the private
 LoreMax repository) at `docs/catalog/loremax-workflows.json`, or point
 `LOREMAX_CATALOG_EXPORT` at it; the path is git-ignored and never committed.
+A usage table (generations and refunded generations per workflow) is the other
+input: it orders a route's picks by what studios actually run and turns frequent
+refunds into `caveats` — it stays local too, and only the resulting order and
+wording reach `guide.mjs`.
 Compare it against `guide.mjs`, update the entries and routes, run `npm test`
 (the guide test then checks every key against the export) and release. Cheap or
 draft workflows are never a route's first pick. In REST mode `recommended` and
