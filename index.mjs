@@ -1365,7 +1365,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   registerTool({
     name: "loremax_workflows",
     description:
-      "LoreMax workflows of this organization (free). Without workflow_id: the list (id, visual_id, title, category), optionally filtered by query. With workflow_id: that workflow's input fields (keys, types, options) and its price in LoreMax tokens — ALWAYS read it before a paid loremax_generate: inputs are passed through exactly as these fields name them.",
+      "LoreMax workflows of this organization (free). Without workflow_id: the list (id, visual_id, title, category), optionally filtered by query. With workflow_id: that workflow's input fields (keys, types, options) and its price in LoreMax tokens — ALWAYS read it before a paid loremax_generate: inputs are passed through exactly as these fields name them. Start from recommended, the best live workflow per task, and follow rules; cheap or draft workflows only when someone asked for cheap or draft.",
     schema: {
       workflow_id: z.string().optional().describe("numeric id or visual id from the list; returns input fields and price"),
       query: z.string().optional().describe("case-insensitive filter over title, description, visual id and category"),
@@ -1377,10 +1377,17 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       if (!id) {
         const r = await lmx.restJson("/api/v1/workflows", {}, { deadline });
         const q = String(args.query ?? "").trim().toLowerCase();
-        const workflows = (r.workflows ?? [])
-          .map((w) => ({ id: w.id, visual_id: w.visualId, title: w.title, category: w.category, description: short(w.description) }))
-          .filter((w) => !q || [w.title, w.description, w.visual_id, w.category].some((v) => String(v ?? "").toLowerCase().includes(q)));
+        const all = (r.workflows ?? []).map((w) => ({ id: w.id, visual_id: w.visualId, title: w.title, category: w.category, description: short(w.description) }));
+        const workflows = all.filter((w) => !q || [w.title, w.description, w.visual_id, w.category].some((v) => String(v ?? "").toLowerCase().includes(q)));
+        // routes over the organization's live workflows, before the list so cap() never cuts them
+        const recommended = recommendedFrom(guide, all.map((w) => ({ ...w, visualId: w.visual_id, workflowId: w.id })), q).map((rt) => ({
+          task: rt.task,
+          workflows: rt.picks.map(({ item, entry }) => ({ id: item.id, visual_id: item.visual_id, title: item.title, why: entry?.use_for })),
+        }));
+        const rules = !q && Array.isArray(guide?.rules) && guide.rules.length ? guide.rules : undefined;
         return text(cap(JSON.stringify({
+          ...(recommended.length ? { recommended } : {}),
+          ...(rules ? { rules } : {}),
           workflows,
           hint: workflows.length
             ? "call loremax_workflows with workflow_id to read its input fields and price before loremax_generate"
@@ -1395,6 +1402,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         usage_hint: d.usage_hint,
         ...(d.pricing_variables_required ? { pricing_variables_required: d.pricing_variables_required } : {}),
       };
+      // the agent may name the workflow either way; LoreMax's answer fills in the other
+      const numeric = /^\d+$/.test(id);
+      const entry = guideEntry(guide, { visualId: d.visual_id ?? (numeric ? undefined : id), workflowId: d.id ?? (numeric ? id : undefined) });
+      if (entry) out.guide = { use_for: entry.use_for, knobs: entry.knobs, caveats: entry.caveats };
       // the price is a courtesy: a pricing hiccup must not hide the fields the agent needs
       try {
         const p = await lmx.mcpCall("get_pricing", { workflowId: id }, { deadline });

@@ -154,18 +154,18 @@
 - [x] run tests - must pass before task 2
 
 ### Task 2: REST mode — `recommended`, `rules` and `guide` in `loremax_workflows`
-- [ ] list (no `workflow_id`): reply `{ recommended, rules, workflows, hint }` with `recommended` first; items
+- [x] list (no `workflow_id`): reply `{ recommended, rules, workflows, hint }` with `recommended` first; items
   `{ id, visual_id, title, why }` where `why` is the entry's `use_for`; omit `recommended` when it is empty
-- [ ] with `query`: `recommended` filtered by the same query, `rules` omitted
-- [ ] details (`workflow_id`): add `guide: { use_for, knobs, caveats }` when an entry matches the workflow's
+- [x] with `query`: `recommended` filtered by the same query, `rules` omitted
+- [x] details (`workflow_id`): add `guide: { use_for, knobs, caveats }` when an entry matches the workflow's
   visual id or id (the id may be given as either)
-- [ ] extend the REST tool description with: start from `recommended`, the best live workflow per task; cheap or
+- [x] extend the REST tool description with: start from `recommended`, the best live workflow per task; cheap or
   draft workflows only when asked
-- [ ] update `test/workflows.test.mjs:172` (the description is no longer 0.1.0's; the schema and calls still are)
-- [ ] write tests: recommended only with live workflows, dead route dropped, `recommended` and `rules` survive
+- [x] update `test/workflows.test.mjs:172` (the description is no longer 0.1.0's; the schema and calls still are)
+- [x] write tests: recommended only with live workflows, dead route dropped, `recommended` and `rules` survive
   `cap()` with a huge list, query filters `recommended` and drops `rules`, details carry `guide` (matched by
   visual id and by numeric id), no `guide` key when unmatched, an empty guide changes nothing but `rules`
-- [ ] run tests - must pass before task 3
+- [x] run tests - must pass before task 3
 
 ### Task 3: Profile mode — the profile's instructions, read lazily
 - [ ] add `createProfileInstructions(lmx, { now })` next to `createProfileCatalog`: `get({ deadline })` sends one

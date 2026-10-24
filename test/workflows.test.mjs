@@ -5,9 +5,9 @@ import activate from "../index.mjs";
 import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError, fakeSleep } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
-const tool = async () => {
+const tool = async (opts) => {
   const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
-  await activate(ctx);
+  await activate(ctx, opts);
   const t = rec.tools.get("loremax_workflows");
   return { run: async (args) => JSON.parse((await t.handler(args, {})).content[0].text), rec };
 };
@@ -169,16 +169,143 @@ test("REST mode: the call stays under the client timeout — a Retry-After that 
   assert.deepEqual(time.slept, []);
 });
 
-test("REST mode: description, schema and calls are 0.1.0's", async () => {
+test("REST mode: schema and calls are 0.1.0's; the description adds the guide", async () => {
   const f = mockFetch([["GET", "/api/v1/workflows", () => LIST]]);
   restore = f.restore;
   const { run, rec } = await tool();
   const t = rec.tools.get("loremax_workflows");
   assert.deepEqual(Object.keys(t.schema), ["workflow_id", "query"]);
   assert.match(t.description, /price in LoreMax tokens — ALWAYS read it before a paid loremax_generate/);
+  assert.match(t.description, /Start from recommended, the best live workflow per task/);
+  assert.match(t.description, /cheap or draft workflows only when someone asked/);
   assert.doesNotMatch(t.description, /curated/);
   await run({});
   assert.ok(f.calls.every((c) => !c.url.includes("/api/mcp/s/")));
+});
+
+// ---------- REST mode: the routing guide ----------
+
+const GUIDE_T = {
+  rules: ["rule one", "rule two"],
+  workflows: {
+    "flux-portrait": { use_for: "character portraits", knobs: "prompt, aspect_ratio", caveats: "no text" },
+    "id:12": { use_for: "animate a still", knobs: "duration", caveats: "one take" },
+    "gone-model": { use_for: "not in this organization" },
+  },
+  routes: [
+    { task: "portrait", pick: ["gone-model", "flux-portrait"] },
+    { task: "video from a frame", pick: ["id:12", "flux-portrait"] },
+    { task: "dead route", pick: ["gone-model"] },
+  ],
+};
+const EMPTY_GUIDE = { rules: ["only a rule"], workflows: {}, routes: [] };
+
+test("guide list: recommended first, live picks only, dead route dropped, then rules and workflows", async () => {
+  const f = mockFetch([["GET", "/api/v1/workflows", () => LIST]]);
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  const r = await run({});
+  assert.deepEqual(Object.keys(r), ["recommended", "rules", "workflows", "hint"]);
+  assert.deepEqual(r.recommended, [
+    { task: "portrait", workflows: [{ id: 11, visual_id: "flux-portrait", title: "Flux portrait", why: "character portraits" }] },
+    {
+      task: "video from a frame",
+      workflows: [
+        { id: 12, visual_id: "kling-i2v", title: "Kling image to video", why: "animate a still" },
+        { id: 11, visual_id: "flux-portrait", title: "Flux portrait", why: "character portraits" },
+      ],
+    },
+  ]);
+  assert.deepEqual(r.rules, ["rule one", "rule two"]);
+  assert.equal(r.workflows.length, 2);
+});
+
+test("guide list: an organization with none of the picks gets no recommended key", async () => {
+  const f = mockFetch([["GET", "/api/v1/workflows", () => ({ workflows: [{ id: 99, visualId: "other", title: "Other", category: "image" }] })]]);
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  const r = await run({});
+  assert.equal("recommended" in r, false);
+  assert.deepEqual(r.rules, ["rule one", "rule two"]);
+});
+
+test("guide list: recommended and rules survive cap() with a huge list", async () => {
+  const many = Array.from({ length: 300 }, (_, i) => ({ id: 100 + i, visualId: `w-${i}`, title: `Workflow ${i}`, description: "x".repeat(200), category: "image" }));
+  const f = mockFetch([["GET", "/api/v1/workflows", () => ({ workflows: [...many, ...LIST.workflows] })]]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE } });
+  await activate(ctx, { guide: GUIDE_T });
+  const out = (await rec.tools.get("loremax_workflows").handler({}, {})).content[0].text;
+  assert.ok(out.endsWith("…(truncated)"));
+  const listAt = out.indexOf('\n "workflows": [');
+  assert.ok(listAt > 0);
+  const head = out.slice(0, listAt);
+  assert.match(head, /"recommended"/);
+  assert.match(head, /"why": "animate a still"/);
+  assert.match(head, /"rule two"/);
+});
+
+test("guide list: query filters recommended and drops rules", async () => {
+  const f = mockFetch([["GET", "/api/v1/workflows", () => LIST]]);
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  // by task: the whole route
+  const byTask = await run({ query: "video from" });
+  assert.equal("rules" in byTask, false);
+  assert.deepEqual(byTask.recommended.map((x) => [x.task, x.workflows.map((w) => w.id)]), [["video from a frame", [12, 11]]]);
+  // by item: only the matching workflows of each route
+  const byItem = await run({ query: "kling" });
+  assert.equal("rules" in byItem, false);
+  assert.deepEqual(byItem.recommended.map((x) => [x.task, x.workflows.map((w) => w.id)]), [["video from a frame", [12]]]);
+  assert.deepEqual(byItem.workflows.map((w) => w.id), [12]);
+  const none = await run({ query: "nothing-like-this" });
+  assert.deepEqual(Object.keys(none), ["workflows", "hint"]);
+});
+
+test("guide list: an empty guide changes nothing but rules", async () => {
+  const f = mockFetch([["GET", "/api/v1/workflows", () => LIST]]);
+  restore = f.restore;
+  const plain = await (await tool({ guide: { rules: [], workflows: {}, routes: [] } })).run({});
+  const ruled = await (await tool({ guide: EMPTY_GUIDE })).run({});
+  assert.deepEqual(Object.keys(plain), ["workflows", "hint"]);
+  assert.deepEqual(ruled, { rules: ["only a rule"], ...plain });
+});
+
+const detailsMock = (d) =>
+  mockFetch([mcpRoute({ get_workflow_details: () => mcpResult(d), get_pricing: () => mcpResult({ tokenCost: 5 }) })]);
+
+test("guide details: matched by visual id, asked for by numeric id", async () => {
+  const f = detailsMock({ id: 11, visual_id: "flux-portrait", title: "Flux portrait", input_fields: [] });
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  const r = await run({ workflow_id: "11" });
+  assert.deepEqual(r.guide, { use_for: "character portraits", knobs: "prompt, aspect_ratio", caveats: "no text" });
+  assert.equal(r.token_cost, 5);
+});
+
+test("guide details: matched by numeric id, asked for by visual id", async () => {
+  const f = detailsMock({ id: 12, visual_id: "kling-i2v", title: "Kling", input_fields: [] });
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  const r = await run({ workflow_id: "kling-i2v" });
+  assert.deepEqual(r.guide, { use_for: "animate a still", knobs: "duration", caveats: "one take" });
+});
+
+test("guide details: LoreMax's reply without ids still matches the id the agent gave", async () => {
+  const f = detailsMock({ input_fields: [] });
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  assert.equal((await run({ workflow_id: "12" })).guide.use_for, "animate a still");
+  assert.equal((await run({ workflow_id: "flux-portrait" })).guide.use_for, "character portraits");
+});
+
+test("guide details: no guide key when the workflow has no entry", async () => {
+  const f = detailsMock({ id: 99, visual_id: "other", input_fields: [] });
+  restore = f.restore;
+  const { run } = await tool({ guide: GUIDE_T });
+  const r = await run({ workflow_id: "other" });
+  assert.equal("guide" in r, false);
+  assert.equal(r.token_cost, 5);
 });
 
 // ---------- profile mode ----------
