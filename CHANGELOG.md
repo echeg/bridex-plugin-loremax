@@ -14,8 +14,9 @@ texts.
 - **Profile instructions**: in profile mode the list carries `instructions` — the profile's description, read through
   `initialize` only when the agent lists the tools, cached for 10 minutes, with LoreMax's standard operating lines
   dropped; `null` when `initialize` fails, with the list intact. The list also carries `recommended` by profile tool
-  names, `rules` and a per-tool `use_for`; a tool's details carry `guide`, dropped first when the reply is over its
-  cap (the schema is still never cut). The studio's instructions and the tools' own descriptions take precedence over
+  names, `rules` and a per-tool `use_for`, which give way first when a full profile's list would go over the reply
+  cap (then the descriptions shrink; no tool row is cut); a tool's details carry `guide`, dropped first when the
+  reply is over its cap (the schema is still never cut). The studio's instructions and the tools' own descriptions take precedence over
   the guide, and the hint says so.
 - **`loremax_profile_edit`**: with the new `allow_profile_edit` config (default `false`), profile mode registers a
   fourth tool that rewrites the profile's description and its bound tools' descriptions in LoreMax — for every

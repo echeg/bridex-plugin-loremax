@@ -851,43 +851,52 @@ export function createProfileEditor(lmx, { profileManagementId, onSaved } = {}) 
 }
 
 /**
- * loremax_workflows' profile list: one line per generation tool, filtered by `query` over tool, title,
- * category and visual id. Before the tools, so cap() never cuts them: the studio's `instructions`,
- * then the guide's `recommended` routes over the profile's tools (by tool name) and its `rules`
- * (omitted with a query); a tool the guide knows gets a short `use_for`.
+ * loremax_workflows' profile list (JSON text): one line per generation tool, filtered by `query`
+ * over tool, title, category and visual id. Before the tools: the studio's `instructions`, then the
+ * guide's `recommended` routes over the profile's tools (by tool name) and its `rules` (omitted
+ * with a query); a tool the guide knows gets a short `use_for`. Over REPLY_CAP the guide yields
+ * first (its prose, then its routes), then the descriptions shrink to 100 chars: every tool row and
+ * the hint stay, the instructions stay whole (a profile holds up to 25 tools).
  */
 function profileList(c, query, { guide, instructions = null } = {}) {
   const q = String(query ?? "").trim().toLowerCase();
   const all = [...c.tools.values()];
-  const tools = all
-    .filter((t) => !q || [t.name, t.title, t.identity.category, t.identity.visualId].some((v) => String(v ?? "").toLowerCase().includes(q)))
-    .map((t) => {
-      const entry = guideEntry(guide, t.identity);
-      return {
-        tool: t.name,
-        title: t.title,
-        category: t.identity.category ?? null,
-        description: t.description.slice(0, 200),
-        ...(entry?.use_for ? { use_for: entry.use_for } : {}),
-        required: Array.isArray(t.agentSchema.required) ? t.agentSchema.required : [],
-        file_args: t.fileArgs.map(({ name, mediaType, cardinality }) => ({ name, mediaType, cardinality })),
-      };
-    });
-  const recommended = recommendedFrom(guide, all.map((t) => ({ ...t.identity, title: t.title, tool: t.name })), q).map((rt) => ({
-    task: rt.task,
-    tools: rt.picks.map(({ item, entry }) => ({ tool: item.tool, title: item.title, why: entry?.use_for })),
-  }));
+  const rows = all.filter((t) => !q || [t.name, t.title, t.identity.category, t.identity.visualId].some((v) => String(v ?? "").toLowerCase().includes(q)));
+  const recommended = recommendedFrom(guide, all.map((t) => ({ ...t.identity, title: t.title, tool: t.name })), q);
   const rules = !q && Array.isArray(guide?.rules) && guide.rules.length ? guide.rules : undefined;
-  return {
-    instructions,
-    ...(recommended.length ? { recommended } : {}),
-    ...(rules ? { rules } : {}),
-    tools,
-    // a query matching a route's task keeps its tools in recommended, even when no row matches
-    hint: tools.length || recommended.length
-      ? `call loremax_workflows with tool to read its argument schema before loremax_generate. ${PROFILE_PRECEDENCE}`
-      : q ? `no tool matches "${String(query).slice(0, 100)}" — call without query for the full list` : "this profile has no workflows — add some in LoreMax → Organization → MCP",
-  };
+  const out = ({ cut, prose = false, routes = false }) =>
+    JSON.stringify({
+      instructions,
+      ...(routes && recommended.length ? {
+        recommended: recommended.map((rt) => ({
+          task: rt.task,
+          tools: rt.picks.map(({ item, entry }) => ({ tool: item.tool, title: item.title, ...(prose ? { why: entry?.use_for } : {}) })),
+        })),
+      } : {}),
+      ...(prose && rules ? { rules } : {}),
+      tools: rows.map((t) => {
+        const entry = prose ? guideEntry(guide, t.identity) : null;
+        return {
+          tool: t.name,
+          title: t.title,
+          category: t.identity.category ?? null,
+          description: t.description.slice(0, cut),
+          ...(entry?.use_for ? { use_for: entry.use_for } : {}),
+          required: Array.isArray(t.agentSchema.required) ? t.agentSchema.required : [],
+          file_args: t.fileArgs.map(({ name, mediaType, cardinality }) => ({ name, mediaType, cardinality })),
+        };
+      }),
+      // a query matching a route's task keeps its tools in recommended, even when no row matches
+      hint: rows.length || recommended.length
+        ? `call loremax_workflows with tool to read its argument schema${prose ? "" : " (and its full description and guide: this list was shortened to fit)"} before loremax_generate. ${PROFILE_PRECEDENCE}`
+        : q ? `no tool matches "${String(query).slice(0, 100)}" — call without query for the full list` : "this profile has no workflows — add some in LoreMax → Organization → MCP",
+    }, null, 1);
+  let s;
+  for (const v of [{ cut: 200, prose: true, routes: true }, { cut: 200, routes: true }, { cut: 200 }, { cut: 100 }]) {
+    s = out(v);
+    if (s.length <= REPLY_CAP) break;
+  }
+  return s;
 }
 
 const PROFILE_PRECEDENCE =
@@ -1670,7 +1679,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         if (!name) {
           // a dead profile is reported by the catalog read; the instructions never throw
           const [c, ins] = await Promise.all([catalog.get({ deadline }), instructions.get({ deadline })]);
-          return text(cap(JSON.stringify(profileList(c, args.query, { guide, instructions: ins }), null, 1)));
+          return text(cap(profileList(c, args.query, { guide, instructions: ins })));
         }
         let c = await catalog.get({ deadline });
         let t = c.tools.get(name);

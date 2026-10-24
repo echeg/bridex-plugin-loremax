@@ -165,9 +165,13 @@ What the agent sees in `loremax_workflows`:
 | REST mode | `recommended: [{ task, workflows: [{ id, visual_id, title, why }] }]`, `rules`, `workflows`, `hint` | `guide: { use_for, knobs, caveats }` next to the input fields and price |
 | Profile mode | `instructions`, `recommended: [{ task, tools: [{ tool, title, why }] }]`, `rules`, `tools` (each with `use_for` when the guide knows it), `hint` | `guide` next to the tool's own description and schema |
 
-`recommended` and `rules` come before the list, so a long list is cut, never
-them. With a `query`, `recommended` is filtered by it and `rules` is left out.
-An empty `recommended` is left out too.
+In REST mode `recommended` and `rules` come before the list, so a long list is
+cut, never them. A profile's list (at most 25 tools) is shortened rather than
+cut: when it would go over the size cap, the guide gives way first (`rules`, `why` and `use_for`,
+then `recommended`), then each description shrinks to 100 characters; the
+instructions stay whole and the hint says the list was shortened. With a
+`query`, `recommended` is filtered by it and `rules` is left out. An empty
+`recommended` is left out too.
 
 In profile mode, `instructions` is the profile's description as the LoreMax
 manager wrote it: the plugin reads it from the profile's `initialize` reply,

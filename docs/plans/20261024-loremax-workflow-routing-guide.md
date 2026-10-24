@@ -193,6 +193,9 @@
 - [x] fix the `:454` comment (a profile holds up to 25 tools)
 - [x] ➕ wire `createProfileInstructions` into `activate` (Task 3 only defined it); the list reads the catalog and the instructions in parallel
 - [x] ➕ `recommendedFrom`'s query also matches a profile item's tool name, like the profile list's own filter
+- [x] ➕ a full profile's list over `REPLY_CAP` is shortened, never cut mid-row: the guide gives way first (`rules`,
+  `why`, `use_for`, then `recommended`), then descriptions shrink to 100 chars; every tool row, the whole
+  `instructions` and the hint (saying the list was shortened) stay
 - [x] write tests (with the fixture's `masked-edit` / `styled-portrait` / `id:1` identities and an injected guide):
   list carries instructions, recommended by tool names, `use_for`, the precedence hint; a tool without `_meta` gets
   no `use_for`; details carry `guide`; an over-cap schema drops `guide` and keeps the schema whole; `initialize`

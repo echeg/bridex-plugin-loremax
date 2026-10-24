@@ -2,6 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import activate from "../index.mjs";
+import { GUIDE } from "../guide.mjs";
 import { fakeCtx, mockFetch, jsonResponse, mcpResult, mcpError, fakeSleep } from "./helpers.mjs";
 
 const BASE = "https://lm.test";
@@ -574,6 +575,49 @@ test("profile guide list: a failed initialize gives instructions null, the list 
   fail = false;
   assert.equal((await run({})).instructions, STUDIO_TEXT);
   assert.equal(inits(), 2);
+});
+
+/** A full profile: 25 copies of the fixture's styled_portrait, each its own workflow `wf-<i>`, with a 300-char description. */
+const fullProfile = () => {
+  const base = FIXTURE.result.tools.find((t) => t.name === "styled_portrait");
+  return Array.from({ length: 25 }, (_, i) => ({
+    ...structuredClone(base),
+    name: `styled_portrait_${String(i).padStart(2, "0")}`,
+    description: "d".repeat(300),
+    _meta: { "loremax.ai/workflow": { ...base._meta["loremax.ai/workflow"], workflowId: 100 + i, visualId: `wf-${i}` } },
+  }));
+};
+// a filled guide's size: every tool known, 16 routes of 2 picks
+const FULL_GUIDE = {
+  rules: GUIDE.rules,
+  workflows: Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`wf-${i}`, { use_for: "u".repeat(120) }])),
+  routes: Array.from({ length: 16 }, (_, i) => ({ task: `route task ${i} described in a few words`, pick: [`wf-${i}`, `wf-${(i + 7) % 25}`] })),
+};
+
+test("profile guide list: a full profile over the cap keeps every tool, the hint and the instructions; the guide gives way first", async () => {
+  const studio = "s".repeat(2000);
+  for (const [guide, cut] of [[GUIDE, 200], [FULL_GUIDE, 200]]) {
+    const { raw } = await profileTool(fullProfile, { guide, init: withInstructions(studio) });
+    const s = await raw({});
+    assert.ok(s.length <= 14_000, String(s.length));
+    const r = JSON.parse(s);
+    assert.equal(r.instructions, studio);
+    assert.equal(r.tools.length, 25);
+    assert.ok(r.tools.every((t) => t.description.length === cut && !("use_for" in t)));
+    assert.equal("rules" in r, false);
+    assert.equal("recommended" in r, false);
+    assert.match(r.hint, /shortened to fit.*take precedence over the generic guide/);
+  }
+  // longer tool names leave no room for 200 chars: the descriptions shrink, no row is cut
+  const long = () => fullProfile().map((t) => ({ ...t, name: `${t.name}_${"n".repeat(40)}` }));
+  const r = await (await profileTool(long, { guide: FULL_GUIDE, init: withInstructions(studio) })).run({});
+  assert.equal(r.tools.length, 25);
+  assert.ok(r.tools.every((t) => t.description.length === 100));
+  // without the instructions the routes fit once the prose is gone
+  const roomy = await (await profileTool(() => fullProfile().slice(0, 18), { guide: FULL_GUIDE })).run({});
+  assert.equal("rules" in roomy, false);
+  assert.ok(roomy.recommended.length && roomy.recommended.every((x) => x.tools.every((t) => !("why" in t))));
+  assert.ok(roomy.tools.every((t) => t.description.length === 200 && !("use_for" in t)));
 });
 
 test("profile guide list: a dead profile is still the catalog's error", async () => {
