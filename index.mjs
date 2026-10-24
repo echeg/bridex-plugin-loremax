@@ -73,6 +73,23 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 /** A profile's tools/list is reread after this long, or at once after one of the refresh codes. */
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
+/** Sent as clientInfo in the profile's initialize; kept equal to package.json's version (a test checks). */
+export const PLUGIN_VERSION = "0.2.1";
+const MCP_PROTOCOL_VERSION = "2025-06-18";
+/**
+ * LoreMax appends its standard raw-MCP operating rules to a profile's
+ * instructions; the plugin already does what they describe, so lines starting
+ * with these are dropped and only the studio's own text is shown.
+ */
+const STANDARD_INSTRUCTION_PREFIXES = [
+  "Each workflow tool call starts one paid generation",
+  "Use tools/list for current schemas",
+  "Poll check_generation",
+  "Do not automatically resubmit",
+  "on_behalf_of is a display-only",
+  "An api_key argument must belong",
+  "Media arguments take finalized organization URLs",
+];
 /** Profile tools that are never generations, whatever their schema says. */
 const PROFILE_SERVICE_TOOLS = new Set(["get_balance", "check_generation", "request_upload_url", "finalize_upload", "upload_from_url"]);
 /** Arguments the plugin fills in itself: the agent never sees them in a tool's schema. */
@@ -511,6 +528,76 @@ export function createProfileCatalog(lmx, { now = Date.now, log } = {}) {
   }
 
   return { get, refreshAfter };
+}
+
+/** A profile's initialize instructions → the studio's own text (LoreMax's standard lines dropped), or null if none is left. */
+export function cleanInstructions(raw) {
+  if (typeof raw !== "string") return null;
+  const kept = raw.split("\n").filter((line) => !STANDARD_INSTRUCTION_PREFIXES.some((p) => line.trimStart().startsWith(p)));
+  return kept.join("\n").trim() || null;
+}
+
+/**
+ * The profile's instructions, read lazily: one initialize, sent only when asked
+ * (the list view), cached for CATALOG_TTL_MS; concurrent callers share it. The
+ * catalog load, generation and uploads never send it. A failed or malformed
+ * initialize is null for that call and not cached — the tools work without it,
+ * and a dead profile is reported by the catalog read. get() → string | null.
+ */
+export function createProfileInstructions(lmx, { now = Date.now, log } = {}) {
+  let cached = null;
+  let loading = null;
+  // bumped by invalidate(): a read started before it neither fills the cache nor serves later callers
+  let epoch = 0;
+
+  async function load() {
+    const path = lmx.profilePath();
+    const started = epoch;
+    try {
+      const msg = await lmx.rpc(path, {
+        jsonrpc: "2.0",
+        id: lmx.nextId(),
+        method: "initialize",
+        params: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "bridex-plugin-loremax", version: PLUGIN_VERSION } },
+      }, { timeoutMs: LOOKUP_TIMEOUT_MS });
+      if (msg?.error) throw new Error(msg.error.message ?? JSON.stringify(msg.error));
+      const raw = msg?.result?.instructions;
+      if (typeof raw !== "string") throw new Error("no instructions in the reply");
+      const text = cleanInstructions(raw);
+      if (started === epoch) cached = { text, fetchedAt: now() };
+      return text;
+    } catch (e) {
+      log?.warn?.(`loremax ${path} initialize: ${String(e?.message ?? e).slice(0, 300)} — listing without the profile's instructions`);
+      return null;
+    }
+  }
+
+  /** The cleaned text; each caller waits for the shared read until its own `deadline` only (null when out of time). */
+  async function get({ deadline } = {}) {
+    if (cached && now() - cached.fetchedAt < CATALOG_TTL_MS) return cached.text;
+    if (deadline != null && deadline - now() <= 0) return null;
+    if (!loading) {
+      const p = load().finally(() => {
+        if (loading === p) loading = null;
+      });
+      loading = p;
+    }
+    if (deadline == null) return loading;
+    let timer;
+    const late = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), deadline - now());
+    });
+    return Promise.race([loading, late]).finally(() => clearTimeout(timer));
+  }
+
+  /** Forces the next get() to reread (after the profile's texts were edited). */
+  function invalidate() {
+    epoch++;
+    cached = null;
+    loading = null;
+  }
+
+  return { get, invalidate };
 }
 
 /** loremax_workflows' profile list: one line per generation tool, filtered by `query` over tool, title, category and visual id. */

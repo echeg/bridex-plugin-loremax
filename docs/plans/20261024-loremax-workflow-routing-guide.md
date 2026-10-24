@@ -168,17 +168,18 @@
 - [x] run tests - must pass before task 3
 
 ### Task 3: Profile mode — the profile's instructions, read lazily
-- [ ] add `createProfileInstructions(lmx, { now })` next to `createProfileCatalog`: `get({ deadline })` sends one
+- [x] add `createProfileInstructions(lmx, { now })` next to `createProfileCatalog`: `get({ deadline })` sends one
   `initialize` (`protocolVersion` `2025-06-18`, `clientInfo` `bridex-plugin-loremax` + version) to the profile path,
   caches the cleaned text for `CATALOG_TTL_MS`, shares one in-flight request, and has `invalidate()`
-- [ ] clean the text: drop lines that start with LoreMax's standard rule prefixes (Technical Details), trim, empty
+- [x] clean the text: drop lines that start with LoreMax's standard rule prefixes (Technical Details), trim, empty
   → `null`
-- [ ] a failed or malformed `initialize` (HTTP error including 404, JSON-RPC error, timeout, no `instructions`)
+- [x] a failed or malformed `initialize` (HTTP error including 404, JSON-RPC error, timeout, no `instructions`)
   returns `null` for this call and is not cached; a dead profile is still reported by the catalog read, as today
-- [ ] write tests: one `initialize` per TTL, concurrent callers share it, standard lines stripped and the studio's
+- [x] write tests: one `initialize` per TTL, concurrent callers share it, standard lines stripped and the studio's
   lines kept in order, only-standard text → `null`, failure → `null` and retried next call, `invalidate()` forces a
   reread, the catalog load and generation send no `initialize`
-- [ ] run tests - must pass before task 4
+- [x] ➕ `PLUGIN_VERSION` constant in `index.mjs` for `clientInfo` (a test keeps it equal to `package.json`; bump it with the version in Task 9)
+- [x] run tests - must pass before task 4
 
 ### Task 4: Profile mode — `instructions`, `recommended`, `use_for` and `guide` in `loremax_workflows`
 - [ ] profile list: reply `{ instructions, recommended, rules, tools, hint }`; `recommended` built by
@@ -257,7 +258,7 @@
 - [ ] `README.md`: the guide (what the agent sees in each mode, the precedence rule, how to update it from an
   export), profile size 1–25, "three tools plus an optional fourth", `allow_profile_edit` and
   `loremax_profile_edit` (texts only, preview → apply, the refusals, the concurrent-edit caveat), the config block
-- [ ] `CHANGELOG.md`: 0.3.0 entry; bump `version` in `plugin.yaml` and `package.json` to 0.3.0
+- [ ] `CHANGELOG.md`: 0.3.0 entry; bump `version` in `plugin.yaml`, `package.json` and `PLUGIN_VERSION` in `index.mjs` to 0.3.0
 - [ ] `index.mjs` header comment: the guide and the edit tool
 
 ## Technical Details

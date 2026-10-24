@@ -854,6 +854,8 @@ test("profile happy path: uploads, injected revision and on_behalf_of, sync outp
   // one Bearer key everywhere, and only the profile path: no REST execute in profile mode
   assert.ok(s.f.calls.filter((c) => c.method === "POST").every((c) => c.url === `${BASE}/api/mcp/s/${PROFILE}` && c.headers.authorization === "Bearer lmx_prod_k"));
   assert.ok(s.msgs().filter((m) => UPLOAD_TOOLS.has(m.params?.name)).every((m) => !("on_behalf_of" in m.params.arguments)));
+  // the profile's instructions are read for the list view only: generation and uploads never initialize
+  assert.ok(s.msgs().every((m) => m.method !== "initialize"));
 
   assert.deepEqual(reply, {
     generation_id: "901",
