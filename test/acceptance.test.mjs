@@ -22,9 +22,9 @@ const setup = async () => {
 let restore = () => {};
 afterEach(() => restore());
 
-test("activate wires the three tools, the check, the balance tile and the watcher", async () => {
+test("activate wires the four tools, the check, the balance tile and the watcher", async () => {
   const s = await setup();
-  assert.deepEqual([...s.rec.tools.keys()].sort(), ["loremax_generate", "loremax_result", "loremax_workflows"]);
+  assert.deepEqual([...s.rec.tools.keys()].sort(), ["loremax_generate", "loremax_result", "loremax_upload", "loremax_workflows"]);
   assert.equal(s.rec.checks.length, 1);
   assert.equal(s.rec.stats.length, 1);
   assert.equal(s.rec.shutdown.length, 1);

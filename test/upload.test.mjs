@@ -48,7 +48,7 @@ const EXTRA_TOOLS = [
  * `https://cdn.test/<asset>`. `onPost(req)` may answer a whole POST itself (a Response);
  * `onCall(name, args)` may answer one message (a reply message object); `onPut(req)` may answer a PUT.
  */
-async function setup({ key = "lmx_prod_k", cache = new Map(), onPost, onCall, onPut, clock = { t: 1_000_000 } } = {}) {
+async function setup({ key = "lmx_prod_k", baseUrl = BASE, cache = new Map(), onPost, onCall, onPut, clock = { t: 1_000_000 } } = {}) {
   let tickets = 0;
   const reply = (m) => {
     if (m.method === "tools/list") return { jsonrpc: "2.0", id: m.id, result: { tools: [...structuredClone(FIXTURE.result.tools), ...EXTRA_TOOLS] } };
@@ -73,7 +73,7 @@ async function setup({ key = "lmx_prod_k", cache = new Map(), onPost, onCall, on
     ["PUT", "https://r2.test/put/", (req) => onPut?.(req) ?? new Response(null, { status: 200 })],
   ]);
   restore = f.restore;
-  const { ctx, rec } = fakeCtx({ config: { api_key: key, base_url: BASE, profile_url: PROFILE } });
+  const { ctx, rec } = fakeCtx({ config: { api_key: key, base_url: baseUrl, profile_url: PROFILE } });
   const now = () => clock.t;
   const lmx = createClient(ctx, { now });
   const catalog = createProfileCatalog(lmx, { now, log: ctx.log });
@@ -275,7 +275,7 @@ test("upload: identical bytes within a call are uploaded once, and every positio
   assert.equal(s.f.calls.filter((c) => c.method === "PUT").length, 1);
 });
 
-test("upload: the cache skips a repeat upload for an hour; another key misses", async () => {
+test("upload: the cache skips a repeat upload for an hour; another key or server misses", async () => {
   const cache = new Map();
   const clock = { t: 1_000_000 };
   const s = await setup({ cache, clock });
@@ -294,6 +294,11 @@ test("upload: the cache skips a repeat upload for an hour; another key misses", 
   other.write("src.png", "cached bytes");
   await other.upload("masked_edit", { source: "src.png" });
   assert.equal(other.sent().filter((p) => p.name === "request_upload_url").length, 1);
+  other.f.restore();
+  const elsewhere = await setup({ cache, clock, baseUrl: "https://other.test" });
+  elsewhere.write("src.png", "cached bytes");
+  await elsewhere.upload("masked_edit", { source: "src.png" });
+  assert.equal(elsewhere.sent().filter((p) => p.name === "request_upload_url").length, 1);
 });
 
 test("upload: a same-size edit between hashing and the PUT is refused and never cached", async () => {

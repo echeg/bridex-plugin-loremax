@@ -17,7 +17,8 @@ const { GUIDE } = await import(new URL(`./guide.mjs${new URL(import.meta.url).se
  * loremax_workflows also carries the routing guide (guide.mjs: rules of thumb,
  * which workflow for which task), always intersected with the live catalog; in
  * profile mode the studio's own instructions and tool descriptions take
- * precedence over it. With allow_profile_edit, profile mode adds a fourth tool,
+ * precedence over it. loremax_upload uploads local files or imports public HTTPS
+ * URLs without starting a generation. With allow_profile_edit, profile mode adds
  * loremax_profile_edit: it rewrites the profile's texts in LoreMax (never its
  * bindings), previewing before it saves.
  *
@@ -85,7 +86,7 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
 /** Sent as clientInfo in the profile's initialize; kept equal to package.json's and plugin.yaml's version (a test checks). */
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.4.0";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /**
  * LoreMax appends its standard raw-MCP operating rules to a profile's
@@ -903,9 +904,12 @@ const PROFILE_PRECEDENCE =
   "The studio's instructions and each tool's own description take precedence over the generic guide (recommended, rules, use_for, guide) wherever they disagree.";
 
 const HOW_TO_CALL =
-  "Call loremax_generate with {tool, arguments}: arguments exactly as schema names them (the plugin adds schema_revision and on_behalf_of; never send api_key). File arguments (file_args) take workspace paths — artifacts/… or files in your workdir — and the plugin uploads them; an array file argument takes a list of paths. Conditional rules (fields required, hidden or bounded depending on other fields) live in the schema's x-loremax-conditions; limits caps the media count and total size. A refused call (schema or argument error) is not charged; every accepted call is PAID.";
+  "Call loremax_generate with {tool, arguments}: arguments exactly as schema names them (the plugin adds schema_revision and on_behalf_of; never send api_key). File arguments (file_args) take workspace paths — artifacts/… or files in your workdir — and the plugin uploads them; an array file argument takes a list of paths. For public HTTPS references (including Bridex file_publish URLs), call loremax_upload with sources first and use the returned URLs in the named file arguments. Only finalized assets owned by this LoreMax organization can be passed as URLs; a content.loremax.ai URL alone does not prove ownership. The plugin holds the key; do not ask the user to upload manually. Conditional rules (fields required, hidden or bounded depending on other fields) live in the schema's x-loremax-conditions; limits caps the media count and total size. A refused call (schema or argument error) is not charged; every accepted call is PAID.";
 const HOW_TO_CALL_SHORT =
-  "loremax_generate {tool, arguments}: file arguments take workspace paths (artifacts/… or workdir files); conditional rules live in x-loremax-conditions.";
+  "loremax_generate {tool, arguments}: file arguments take workspace paths; import external HTTPS references with loremax_upload first. Conditional rules: x-loremax-conditions.";
+
+const REST_REFERENCES_HINT =
+  "For named media inputs (image_url, source, start_image, mask, etc.), call loremax_upload {sources: [workspace path or public HTTPS URL]} first, then put its returned URLs into inputs under the exact field names and string/array shape the workflow expects. references sends local files only to generic image_urls/video_urls/audio_urls; it does NOT fill named slots. Do not put local paths into inputs or external URLs into references. A public Bridex file_publish URL can be imported with loremax_upload; no manual upload or API key from the agent is needed. Do not assume references, image_url and image_urls are interchangeable. filesCount in the LoreMax UI preview is not an API argument.";
 
 /**
  * loremax_workflows' profile detail, with the guide's entry for the tool when there
@@ -1326,10 +1330,10 @@ async function mapLimit(items, limit, fn) {
 }
 
 /**
- * Workspace files for a profile tool's file arguments: checked against the
+ * Workspace files for a tool's file arguments: checked against the
  * tool's x-loremax-media and x-loremax-limits before any HTTP, then uploaded
  * (request_upload_url → PUT → finalize_upload) and swapped for their finalized
- * URLs. `cache` (sha256(key) + mediaType + sha256(file) → url) is process-wide.
+ * URLs. `cache` (sha256(server + key) + mediaType + sha256(file) → url) is process-wide.
  */
 export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (globalThis[Symbol.for("bridex.loremax.uploads")] ??= new Map()) } = {}) {
   /** A refused or failed upload: the generation was never sent. */
@@ -1355,9 +1359,12 @@ export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (glo
     while (cache.size > UPLOAD_CACHE_MAX) cache.delete(cache.keys().next().value);
   }
 
-  /** One batch of tool calls on the profile path → each call's data, in order. */
+  /** Upload services exist on both the organization endpoint and profile paths. */
+  const uploadPath = () => lmx.profilePath() ?? "/api/mcp";
+
+  /** One batch of upload calls → each call's data, in order. */
   async function batch(name, argsList, opts) {
-    const path = lmx.profilePath();
+    const path = uploadPath();
     const msgs = argsList.map((a) => ({ jsonrpc: "2.0", id: lmx.nextId(), method: "tools/call", params: { name, arguments: a } }));
     const replies = await lmx.rpc(path, msgs, opts);
     return msgs.map((m) => {
@@ -1495,7 +1502,7 @@ export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (glo
       if (Number.isFinite(lim.maxMediaPositions) && positions.length > lim.maxMediaPositions) throw new Error(`${tool.name}: ${positions.length} files; this tool takes at most ${lim.maxMediaPositions} per call`);
       if (Number.isFinite(lim.maxTotalBytes) && uniqueBytes > lim.maxTotalBytes) throw new Error(`${tool.name}: the files add up to ${sizeOf(uniqueBytes)}; this tool takes at most ${sizeOf(lim.maxTotalBytes)} per call`);
 
-      const keyHash = sha256(lmx.key());
+      const keyHash = sha256(`${lmx.baseUrl()}:${lmx.key()}`);
       const items = new Map();
       for (const pos of positions) {
         if (!pos.abs) continue;
@@ -1534,7 +1541,57 @@ export function createUploader(ctx, lmx, outputs, { now = Date.now, cache = (glo
     }
   }
 
-  return { uploadFiles };
+  /** Explicit, free upload/import for either mode; never submits a generation. */
+  async function uploadSources(call, sources, { mediaType, deadline } = {}) {
+    try {
+      if (!Array.isArray(sources) || !sources.length || sources.length > MAX_REFS) throw new Error(`sources must contain 1..${MAX_REFS} workspace paths or public HTTPS URLs`);
+      if (mediaType != null && !Object.hasOwn(MIME_BY_MEDIA, mediaType)) throw new Error("media_type must be image, video, audio or model");
+      const fileArgs = [];
+      const args = {};
+      // Validate every source before uploading anything. URL reachability, redirects,
+      // size, MIME and ownership are handled by LoreMax's upload_from_url service.
+      const positions = sources.map((source, i) => {
+        if (typeof source !== "string" || !source.trim()) throw new Error("each source must be a non-empty workspace path or public HTTPS URL");
+        if (/^[a-z][a-z0-9+.-]*:/i.test(source)) {
+          let url;
+          try { url = new URL(source); } catch { throw new Error(`source ${i + 1}: invalid URL`); }
+          if (url.protocol !== "https:" || url.username || url.password) throw new Error(`source ${i + 1}: use a public https:// URL without credentials`);
+          return { source, remote: true };
+        }
+        const ext = path.extname(source).slice(1).toLowerCase();
+        const type = mediaType ?? Object.keys(MIME_BY_MEDIA).find((t) => Object.hasOwn(MIME_BY_MEDIA[t], ext));
+        if (!type) throw new Error(`source ${i + 1}: unsupported file extension .${ext || "(none)"}; specify media_type for ambiguous formats`);
+        const name = `source_${i}`;
+        fileArgs.push({ name, mediaType: type, cardinality: "single" });
+        args[name] = source;
+        return { source, name, media_type: type };
+      });
+      const local = await uploadFiles(call, { name: "loremax_upload", fileArgs }, args, { deadline });
+      // Deduplicate remote URLs within this call only: a public URL may change
+      // between calls. LoreMax deduplicates the fetched bytes by checksum.
+      const imported = new Map();
+      const files = [];
+      for (const pos of positions) {
+        if (!pos.remote) {
+          files.push({ source: pos.source, url: local.arguments[pos.name], media_type: pos.media_type });
+          continue;
+        }
+        let asset = imported.get(pos.source);
+        if (!asset) {
+          asset = await lmx.toolCall(uploadPath(), "upload_from_url", { url: pos.source }, { deadline });
+          if (typeof asset?.url !== "string" || !/^https:\/\//.test(asset.url) || !Object.hasOwn(MIME_BY_MEDIA, asset.media_type)) throw new Error("loremax upload_from_url: no finalized URL/media_type in the reply");
+          if (mediaType && asset.media_type !== mediaType) throw new Error(`source ${files.length + 1}: imported ${asset.media_type}, expected ${mediaType}`);
+          imported.set(pos.source, asset);
+        }
+        files.push({ source: pos.source, url: asset.url, media_type: asset.media_type });
+      }
+      return { files, urls: files.map((f) => f.url) };
+    } catch (e) {
+      throw refused(e);
+    }
+  }
+
+  return { uploadFiles, uploadSources };
 }
 
 /** The wake line for a finished generation: saved paths, and the URLs left on the CDN (paid for all the same). */
@@ -1663,7 +1720,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   const catalog = profile?.path ? createProfileCatalog(lmx, { now, log: ctx.log }) : null;
   /** The studio's own profile instructions, read only by the list view. */
   const instructions = profile?.path ? createProfileInstructions(lmx, { now, log: ctx.log }) : null;
-  const uploader = profile?.path ? createUploader(ctx, lmx, outputs, { now }) : null;
+  const uploader = createUploader(ctx, lmx, outputs, { now });
   if (profile) {
     profileTools.set("loremax_workflows", {
       name: "loremax_workflows",
@@ -1698,7 +1755,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     profileTools.set("loremax_generate", {
       name: "loremax_generate",
       description:
-        `Run a curated LoreMax workflow. PAID per call: read the tool's schema with loremax_workflows first and pass arguments exactly as it names them. File arguments take workspace paths (artifacts/… or workdir files); the plugin uploads them. Outputs are saved into this task's artifacts with provenance. A refused call (status rejected: bad arguments, changed schema, unavailable tool) is not charged — fix and call again. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands. Never call it again for a submitting reply.`,
+        `Run a curated LoreMax workflow. PAID per call: read the tool's schema with loremax_workflows first and pass arguments exactly as it names them. File arguments take workspace paths (artifacts/… or workdir files); the plugin uploads them. For external HTTPS references, including Bridex links, call loremax_upload first and pass the returned URLs. Outputs are saved into this task's artifacts with provenance. A refused call (status rejected: bad arguments, changed schema, unavailable tool) is not charged — fix and call again. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands. Never call it again for a submitting reply.`,
       schema: {
         tool: z.string().describe("tool name from loremax_workflows"),
         arguments: z.record(z.string(), z.unknown()).describe("arguments exactly as the tool's schema names them"),
@@ -1752,9 +1809,28 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   }
 
   registerTool({
+    name: "loremax_upload",
+    description:
+      "Upload reference media to LoreMax without starting a generation (free, no generation tokens). sources takes workspace paths (artifacts/… or workdir files) and/or public HTTPS URLs, including Bridex file_publish links. Local files use signed upload + finalize; URLs are imported server-side. Returns files [{source, url, media_type}] and urls in source order, including duplicates. Use the returned URLs in the workflow's named inputs (REST) or file arguments (profile). The plugin uses its managed key; never ask the user to upload manually or provide a key. Up to 20 sources, 50 MiB each. For profile generation with local files, pass paths directly to loremax_generate instead. Slow batches can be split; completed local uploads are cached for an hour.",
+    schema: {
+      sources: z.array(z.string()).min(1).max(MAX_REFS).describe("workspace file paths or public HTTPS URLs to import, in reference order"),
+      media_type: z.enum(["image", "video", "audio", "model"]).optional().describe("optional type for all sources; local extensions and imported metadata determine it otherwise; specify audio for an audio-only .mp4"),
+    },
+    handler: async (args, call) => {
+      const result = await uploader.uploadSources(call, args.sources, { mediaType: args.media_type, deadline: now() + MAX_WAIT_S * 1000 });
+      return text(JSON.stringify({
+        ...result,
+        hint: profile
+          ? "Use these finalized URLs in the file arguments from loremax_workflows {tool}; keep each argument's string/array shape. No generation was started."
+          : "Use these URLs in inputs under the exact media field names from loremax_workflows {workflow_id}; keep their string/array shape. Do not put URLs in references. No generation was started.",
+      }, null, 1));
+    },
+  });
+
+  registerTool({
     name: "loremax_workflows",
     description:
-      "LoreMax workflows of this organization (free). Without workflow_id: the list (id, visual_id, title, category), optionally filtered by query. With workflow_id: that workflow's input fields (keys, types, options) and its price in LoreMax tokens — ALWAYS read it before a paid loremax_generate: inputs are passed through exactly as these fields name them. Start from recommended, the best live workflow per task, and follow rules; cheap or draft workflows only when someone asked for cheap or draft.",
+      "LoreMax workflows of this organization (free). Without workflow_id: the list (id, visual_id, title, category), optionally filtered by query. With workflow_id: that workflow's input fields (keys, types, options), reference_usage and its price in LoreMax tokens — ALWAYS read it before a paid loremax_generate: inputs are passed through exactly as these fields name them. For named reference slots, upload/import with loremax_upload first and put its URLs in inputs. Start from recommended, the best live workflow per task, and follow rules; cheap or draft workflows only when someone asked for cheap or draft.",
     schema: {
       workflow_id: z.string().optional().describe("numeric id or visual id from the list; returns input fields and price"),
       query: z.string().optional().describe("case-insensitive filter over title, description, visual id and category"),
@@ -1787,6 +1863,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const d = (await lmx.mcpCall("get_workflow_details", { visual_id: id }, { deadline })) ?? {};
       const out = {
         workflow: { id: d.id ?? id, visual_id: d.visual_id, title: d.title, category: d.category, description: d.description },
+        reference_usage: REST_REFERENCES_HINT,
         input_fields: d.input_fields ?? [],
         usage_hint: d.usage_hint,
         ...(d.pricing_variables_required ? { pricing_variables_required: d.pricing_variables_required } : {}),
@@ -1795,6 +1872,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const numeric = /^\d+$/.test(id);
       const entry = guideEntry(guide, { visualId: d.visual_id ?? (numeric ? undefined : id), workflowId: d.id ?? (numeric ? id : undefined) });
       if (entry) out.guide = { use_for: entry.use_for, knobs: entry.knobs, caveats: entry.caveats };
+      if (entry?.rest_reference_inputs) out.reference_example = {
+        upload: { sources: ["artifacts/reference.png"] },
+        inputs: entry.rest_reference_inputs,
+        hint: "Replace <uploaded-url> with loremax_upload.urls[0]. For multiple references, keep the same URL order in both arrays and set slots_image_count to their length. Merge with the prompt and other workflow inputs; this example applies to REST, not profile argument names.",
+      };
       // the price is a courtesy: a pricing hiccup must not hide the fields the agent needs
       try {
         const p = await lmx.mcpCall("get_pricing", { workflowId: id }, { deadline });
@@ -1982,6 +2064,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   function loadReferences(ws, refs) {
     if (refs.length > MAX_REFS) throw new Error(`at most ${MAX_REFS} references per generation, got ${refs.length}`);
     return refs.map((p) => {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(p)) throw new Error("references takes local workspace files only; import public HTTPS URLs with loremax_upload, then use the returned URLs in inputs under the workflow's media field names — nothing was charged");
       const abs = outputs.resolveLocal(ws, p);
       const size = fs.statSync(abs).size;
       if (size > REF_CAP) throw new Error(`reference ${p} is ${(size / 1e6).toFixed(1)}MB; the plugin sends up to ${REF_CAP / 1024 / 1024}MB per file`);
@@ -2262,11 +2345,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   registerTool({
     name: "loremax_generate",
     description:
-      `Run a LoreMax workflow (image, video, audio, 3D or text) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. references are artifacts/… paths or workspace files (each ≤ 20MB, up to 20) sent to LoreMax as files. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands (or poll loremax_result with the generation_id). Never call it again for a submitting reply.`,
+      `Run a LoreMax workflow (image, video, audio, 3D or text) and wait for the result. inputs are passed through unchanged — name them exactly as loremax_workflows lists the workflow's input fields. For named media slots (e.g. image_url), use loremax_upload first and put its URLs into inputs; read reference_usage and reference_example from loremax_workflows. references are local files (each ≤ 20MB, up to 20) sent ONLY to generic image_urls/video_urls/audio_urls, not named slots. Outputs are downloaded into this task's artifacts with provenance; the reply lists their paths. Every call is PAID in LoreMax tokens: read the workflow's fields and price with loremax_workflows first. Waits at most ${MAX_WAIT_S}s: if the wait runs out you get status in_progress (with a generation_id) or submitting back and are WOKEN when it lands (or poll loremax_result with the generation_id). Never call it again for a submitting reply.`,
     schema: {
       workflow_id: z.string().describe("numeric id or visual id from loremax_workflows"),
       inputs: z.record(z.string(), z.unknown()).describe("workflow inputs, exactly as loremax_workflows names the input fields"),
-      references: z.array(z.string()).max(MAX_REFS).optional().describe("artifacts/<path> or workspace files sent as reference images/videos"),
+      references: z.array(z.string()).max(MAX_REFS).optional().describe("local files for generic image_urls/video_urls/audio_urls ONLY; named slots need loremax_upload then URLs in inputs; no HTTPS URLs here"),
       wait_s: z.number().int().min(10).max(MAX_WAIT_S).optional().describe(`seconds to wait before handing back (10..${MAX_WAIT_S}; default from config, ${DEFAULT_WAIT_S})`),
       note: z.string().max(200).optional().describe("short provenance note stored on the outputs (what this is for)"),
     },

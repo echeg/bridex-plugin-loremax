@@ -92,6 +92,9 @@ export const GUIDE = {
       use_for: "edit or vary an image by instruction, the rest stays intact",
       knobs: "model Flare or Sunburst; quality; background transparent; image_size",
       caveats: "say what must not change; vary the same base card each time, not the previous variation",
+      // Mirrors the supplied workflow 337 UI payload. Displayed only in REST
+      // details: a curated profile may rename its file arguments.
+      rest_reference_inputs: { image_url: ["<uploaded-url>"], image_urls: ["<uploaded-url>"], slots_image_count: 1 },
     },
     "Image2Image_NanoBanana_Edit_v2": {
       use_for: "fast, reliable edits and variations from reference images, up to 4K",

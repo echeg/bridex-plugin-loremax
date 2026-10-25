@@ -59,7 +59,7 @@ test("profile edit: registered only in profile mode with allow_profile_edit", as
   assert.equal((await tools({ api_key: "lmx_prod_k", base_url: BASE, allow_profile_edit: true })).has("loremax_profile_edit"), false);
   assert.equal((await tools(config())).has("loremax_profile_edit"), false);
   const on = await tools(config({ allow_profile_edit: true }));
-  assert.deepEqual([...on.keys()].sort(), ["loremax_generate", "loremax_profile_edit", "loremax_result", "loremax_workflows"]);
+  assert.deepEqual([...on.keys()].sort(), ["loremax_generate", "loremax_profile_edit", "loremax_result", "loremax_upload", "loremax_workflows"]);
   assert.match(on.get("loremax_profile_edit").description, /EVERY client of the profile/);
 });
 

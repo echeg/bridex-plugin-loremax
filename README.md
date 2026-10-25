@@ -108,9 +108,9 @@ Camera) need REST mode.
 
 ## Tools
 
-The plugin always registers the same three tools, so agent prompts do not
+The plugin always registers the same four tools, so agent prompts do not
 change between modes; their arguments and descriptions do. Profile mode adds an
-optional fourth, `loremax_profile_edit`, only with `allow_profile_edit: true`
+optional fifth, `loremax_profile_edit`, only with `allow_profile_edit: true`
 (see [Editing the profile's texts](#editing-the-profiles-texts)).
 
 REST mode:
@@ -118,7 +118,8 @@ REST mode:
 | Tool | Cost | What |
 |---|---|---|
 | `loremax_workflows` | free | without `workflow_id`: `recommended` (the guide's best live workflows per task), the guide's `rules`, then the organization's workflows (id, visual id, title, category), optionally filtered by `query`. With `workflow_id`: its input fields (keys, types, options), usage hint, price in tokens and the guide's entry for it (`guide`) when there is one |
-| `loremax_generate` | **paid** | run a workflow (`workflow_id` numeric or visual id) with `inputs` exactly as the fields name them and up to 20 `references` (`artifacts/…` or workspace files, ≤ 20 MB each, sent as files); wait `wait_s` (10–50 s, default `default_wait_s` = 45), download the outputs into `artifacts/<task>/`, record the spend. `note` (≤ 200 chars) is a provenance note; it defaults to the first 120 chars of `inputs.prompt` |
+| `loremax_generate` | **paid** | run a workflow (`workflow_id` numeric or visual id) with `inputs` exactly as the fields name them and up to 20 `references` (`artifacts/…` or workspace files, ≤ 20 MB each, sent as files into generic `image_urls`/`video_urls`/`audio_urls`, not named slots); for named slots, use `loremax_upload` then URLs in `inputs`; wait `wait_s` (10–50 s, default `default_wait_s` = 45), download the outputs into `artifacts/<task>/`, record the spend. `note` (≤ 200 chars) is a provenance note; it defaults to the first 120 chars of `inputs.prompt` |
+| `loremax_upload` | free | upload workspace files or import public HTTPS URLs (including Bridex links); returns ordered finalized URLs for named media inputs, without starting a generation. Up to 20 sources, 50 MiB each |
 | `loremax_result` | free | status / result of a `generation_id` that outlived the wait, from this workspace only; optional `wait_s` (0–50 s, default 0 = one check). Saves outputs the same way, returns the saved paths when the generation already finished, or `status: failed` with LoreMax's error |
 
 Profile mode:
@@ -127,6 +128,7 @@ Profile mode:
 |---|---|---|
 | `loremax_workflows` | free | without `tool`: the studio's `instructions`, `recommended` (the guide's best profile tools per task), the guide's `rules`, then the profile's workflows (tool, title, category, a short description, the guide's `use_for`, required arguments, file arguments), optionally filtered by `query` over tool, title, category and visual id. With `tool`: its full description, the guide's entry for it (`guide`), its full argument schema (JSON Schema, never truncated), file arguments, media limits and how to call it |
 | `loremax_generate` | **paid** | run a profile tool: `tool` and `arguments` exactly as its schema names them; file arguments take workspace paths, which the plugin uploads. `wait_s` and `note` as in REST mode. The plugin adds `schema_revision` and `on_behalf_of` (`bridex:<workspace>:<agent>`); the agent never sends them or an `api_key` |
+| `loremax_upload` | free | upload workspace files or import public HTTPS URLs (including Bridex links); returns ordered finalized URLs for named media inputs, without starting a generation. Up to 20 sources, 50 MiB each |
 | `loremax_result` | free | as in REST mode |
 | `loremax_profile_edit` | free | only with `allow_profile_edit: true`: preview, then save, new texts for the profile's description and its tools' descriptions in LoreMax |
 
@@ -265,6 +267,103 @@ and every request costs one unit of the key's rate limit. LoreMax has no version
 lands between the plugin's reread and its save is lost. Editing the same profile
 from LoreMax and from an agent at the same time is best avoided.
 
+## Uploading references and filling named inputs
+
+`loremax_upload` works in both modes and never starts or charges a generation.
+The plugin holds the API key: the agent needs neither the key nor a manual
+upload by the user. Call it with local files or public HTTPS links:
+
+```json
+{"sources": ["artifacts/scene-test/cad-clean.png"]}
+```
+
+Or, for an already published Bridex file:
+
+```json
+{"sources": ["https://static.example.com/files/cad-clean.png"]}
+```
+
+The reply contains `files: [{source, url, media_type}]`, `urls` in source order,
+and a usage hint. Repeated sources keep their positions. Local files use
+`request_upload_url → PUT → finalize_upload`; public URLs use LoreMax's
+server-side `upload_from_url`. This imports and registers the asset under the
+key's organization. The plugin never sends the key to the source URL.
+
+Each call accepts 1–20 sources, each at most 50 MiB. Media type is inferred;
+`media_type` can specify `image`, `video`, `audio` or `model` for all sources
+(for example `audio` for an audio-only `.mp4`). Local uploads share the profile
+generation uploader's validation, content deduplication and one-hour cache,
+scoped to the LoreMax server and key. Remote URLs are deduplicated within a
+call, but fetched again on later calls because their content can change;
+LoreMax deduplicates the bytes. Calls have the same 50-second budget as other
+tools; split a slow batch into smaller calls. Upload errors do not start a
+generation, and completed local uploads remain cached.
+
+In **REST mode**, `references` is only for the generic media buckets:
+`image_urls`, `video_urls`, `audio_urls`. It cannot fill a named slot such as
+`image_url`, `start_image` or `mask`. For these, upload first, then pass the
+returned URL or URL array under the exact name in `inputs`. Local paths inside
+`inputs` are not uploaded. The workflow details now include `reference_usage`;
+the guide for workflow **337 / `i2i_gpt_image_2.5`** also includes a
+`reference_example` matching the supplied UI payload:
+
+```json
+{
+  "workflow_id": "337",
+  "inputs": {
+    "prompt": "Follow the reference scene",
+    "gen_count": 1,
+    "model": "Sunburst",
+    "quality": "high",
+    "background": "transparent",
+    "image_size_width": 3840,
+    "image_size_height": 2883,
+    "image_url": ["<URL returned by loremax_upload>"],
+    "image_urls": ["<the same URL>"],
+    "slots_image_count": 1
+  }
+}
+```
+
+For five references, use the five returned URLs in the same order in both
+arrays and set `slots_image_count` to 5. This is a workflow-specific example,
+not a rule for every image workflow. `filesCount` belongs to the LoreMax UI
+payload preview; the REST JSON request does not need it. The older multipart
+path uses `fileCount` (singular) to count attached `file_N` fields.
+
+In **profile mode**, local files can go straight into the named file arguments
+of `loremax_generate` as before. For a public URL, call `loremax_upload` first,
+then use its result in the exact argument name and string/array shape from
+`loremax_workflows {tool}`. Profile arguments can be renamed: do not copy the
+REST example's field names into a profile tool without reading its schema.
+
+### Can LoreMax use Bridex R2 links directly?
+
+The source code uses separate storage configuration: Bridex provisions a
+bucket and scoped token for each managed instance, while LoreMax uses its own
+`R2_BUCKET_NAME` / `R2_CUSTOM_DOMAIN`. Sharing a Cloudflare account does not
+establish shared buckets or asset ownership.
+
+LoreMax's REST media pricing and outgoing image checks support trusted origins
+via the comma-separated `INPUT_MEDIA_PRICING_TRUSTED_HOSTS` setting. An operator
+can add a Bridex static origin there (preserving existing entries) to permit
+those checks to read its images without importing them. The accompanying LoreMax
+server change adds leading wildcard support: `*.loremax.ai` covers all HTTPS
+subdomains, including nested Bridex static domains, but not the bare domain or
+non-default ports. Deploy that server change before using a wildcard; older
+servers match exact origins only.
+This does not change slot mapping, guarantee every downstream workflow accepts
+the URL, or register it for MCP profiles. Profiles resolve exact URLs against
+the organization's media registry and verify immutable objects and metadata;
+an allowed hostname alone is insufficient. `loremax_upload` is the portable
+path for both modes and requires no change to that trust configuration.
+
+These contracts were checked in LoreMax's `functions/api/v2/workflow/execute.ts`,
+`functions/api/mcp/tools/uploadFromUrl.ts`,
+`functions/services/mcp/McpMediaAssetResolver.ts`,
+`functions/utils/public-url.ts`, and the slots widget/payload preview code.
+No LoreMax server configuration is changed by installing this plugin update.
+
 ## File arguments (profile mode)
 
 A profile tool marks its file arguments with `x-loremax-media` (media type,
@@ -284,7 +383,8 @@ passes LoreMax's finalized URLs in their original order. Identical files are
 uploaded once per call, and a finalized URL is reused for an hour, so calling
 again after a refused or timed-out call does not upload the same bytes again.
 An `https://` value is passed through unchanged; LoreMax accepts only finalized
-URLs of the same organization. Any refused or failed upload stops the call
+URLs of the same organization. Import external URLs with `loremax_upload` first,
+including public Bridex links and LoreMax URLs not registered to this organization. Any refused or failed upload stops the call
 before the paid generation, with "nothing was charged".
 
 ## Errors the agent may see

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 — 2026-10-25
+
+- Add `loremax_upload` in REST and profile modes: upload workspace files or import
+  public HTTPS links through LoreMax, returning ordered finalized URLs without a
+  paid generation. Reuse the existing uploader, validation and local upload cache;
+  scope cached assets by server as well as key.
+- Explain generic `references` versus named media slots in tool descriptions and
+  workflow details. Add a REST reference example for workflow 337 / `i2i_gpt_image_2.5`
+  with `image_url`, `image_urls` and `slots_image_count`. URL values mistakenly put
+  in `references` now fail before submission with instructions to use the upload tool.
+- Document Bridex URL import, LoreMax's existing trusted-origin setting, and why
+  MCP profiles still require organization-owned finalized assets.
+
 ## 0.3.0 — 2026-10-24
 
 A routing guide in `loremax_workflows`, the studio's profile instructions, and an opt-in tool that edits the profile's

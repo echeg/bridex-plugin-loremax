@@ -128,7 +128,7 @@ test("mode: decided once at activate and logged", async () => {
   await activate(prof.ctx);
   assert.ok(prof.rec.logs.some((l) => l.msg === `loremax mode: profile /api/mcp/s/${PID}`));
   assert.deepEqual(prof.rec.needsConfig, []);
-  assert.deepEqual([...prof.rec.tools.keys()].sort(), ["loremax_generate", "loremax_result", "loremax_workflows"]);
+  assert.deepEqual([...prof.rec.tools.keys()].sort(), ["loremax_generate", "loremax_result", "loremax_upload", "loremax_workflows"]);
   assert.match(prof.rec.tools.get("loremax_workflows").description, /curated/);
   assert.match(prof.rec.tools.get("loremax_generate").description, /workspace paths/);
 });
@@ -148,6 +148,7 @@ test("invalid profile_url: needsConfig, profile tool set, no REST call from any 
   const args = {
     loremax_workflows: [{}, { tool: "x" }],
     loremax_generate: [{ tool: "x", arguments: {} }, { workflow_id: "1", inputs: {} }],
+    loremax_upload: [{ sources: ["https://static.example.com/ref.png"] }],
     loremax_result: [{ generation_id: "42" }, { generation_id: "42", wait_s: 5 }],
   };
   for (const [name, list] of Object.entries(args))
