@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2 — 2026-10-26
+
+- `base_url` / `LOREMAX_BASE_URL` must be LoreMax's address alone (`https://loremax.ai`): a path,
+  query or fragment is a config error naming the setting and pointing at `profile_url`, raised on
+  the plugin card at activation, by the check and by every tool call, before any request.
+- Why: a field report. With `LOREMAX_BASE_URL=https://loremax.ai/api/mcp` and a valid profile
+  the check said "LoreMax refused the key (405)" for a working key. `profile_url`'s same-origin
+  test compares origins only, so it passed; every request went to `/api/mcp/api/mcp/s/<id>`,
+  which LoreMax's static pages answer with 405.
+
 ## 0.4.1 — 2026-10-26
 
 - Every wake now uses one key per conversation, `loremax-wake:<workspace>:<agent>:<session>`

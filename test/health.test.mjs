@@ -145,3 +145,16 @@ test("check: a redirect or an http:// base_url is reported as itself, not as a r
   assert.match(plain.message, /LOREMAX_BASE_URL must be an https:\/\/ URL/);
   assert.equal(f.calls.length, 1, "nothing is sent to an http:// base_url");
 });
+
+test("check: a base_url with a path is reported as itself, not as a refused key (405)", async () => {
+  // LoreMax's static pages answer a POST to /api/mcp/api/mcp/s/<id> with 405
+  const f = mockFetch([]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: `${BASE}/api/mcp`, profile_url: `${BASE}${PROFILE_PATH}` } });
+  await activate(ctx);
+  const r = await rec.checks[0]();
+  assert.equal(r.ok, false);
+  assert.match(r.message, /LOREMAX_BASE_URL must be LoreMax's address alone/);
+  assert.doesNotMatch(r.message, /refused the key/);
+  assert.equal(f.calls.length, 0, "nothing is sent to a base_url with a path");
+});

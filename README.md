@@ -45,7 +45,10 @@ and the plugin card shows `needs env: …` until then. Set `LOREMAX_BASE_URL` to
 `https://loremax.ai` even when LoreMax is at its default address.
 
 `base_url` and `profile_url` are **https only**: an `http://` value is a config
-error naming the setting (raised on the plugin card at activation, and by every
+error naming the setting. `base_url` is the address alone (`https://loremax.ai`):
+a path, query or fragment — `/api/mcp`, or the profile URL pasted into the
+address — is a config error too, since every request path is appended to it;
+the profile goes in `profile_url`. Both errors are (raised on the plugin card at activation, and by every
 tool call), because the key travels in every request. API requests
 never follow a redirect either — a 3xx from LoreMax is refused ("redirected —
 refused, the key must not leave <host>"), so `X-API-Key` reaches no host but
@@ -58,7 +61,7 @@ plugins:
   loremax:
     config:
       api_key: ${LOREMAX_API_KEY}     # default
-      base_url: ${LOREMAX_BASE_URL}   # default; https:// only
+      base_url: ${LOREMAX_BASE_URL}   # default; https:// only, the address alone (no path)
       default_wait_s: 45              # how long loremax_generate waits before handing back (10..50; empty or invalid = 45)
       usd_per_token: 0.001            # optional: tokens → USD for the spend charts; absent = tokens only
       profile_url: https://loremax.ai/api/mcp/s/AbCdEfGh12345678   # optional: profile mode (or the bare publicId)
@@ -409,7 +412,8 @@ hint}`:
 
 These are thrown as tool errors instead:
 
-- a config error: a `base_url` / `LOREMAX_BASE_URL` that is not `https://`,
+- a config error: a `base_url` / `LOREMAX_BASE_URL` that is not `https://`
+  or carries a path, query or fragment,
   an invalid `profile_url`, `PROFILE_NOT_FOUND` (unknown or
   disabled profile, or a key from another organization), or
   `PROFILE_ORGANIZATION_MISMATCH` (the profile belongs to another organization
@@ -570,7 +574,7 @@ remain). In profile mode it reads the balance through the profile and rereads
 its tool list: "profile reachable, N tools · … tk left", failing when the profile
 has no workflows, when the key works but the tool list cannot be read, on a
 404 profile (with the three causes), an invalid `profile_url`, a `base_url`
-that is not `https://` (naming the setting), or a redirect from LoreMax
+that is not `https://` or carries a path (naming the setting), or a redirect from LoreMax
 ("redirected — refused, the key must not leave <host>"). The dashboard shows a "LoreMax balance" tile, marked "running
 out" when it is empty or under 10 % of the limit.
 

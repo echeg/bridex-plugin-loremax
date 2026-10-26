@@ -86,7 +86,7 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
 /** Sent as clientInfo in the profile's initialize; kept equal to package.json's and plugin.yaml's version (a test checks). */
-export const PLUGIN_VERSION = "0.4.1";
+export const PLUGIN_VERSION = "0.4.2";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /**
  * LoreMax appends its standard raw-MCP operating rules to a profile's
@@ -213,6 +213,15 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     // the key rides on every request: never in clear text
     if (!/^https:\/\/[^/]/i.test(raw)) {
       throw Object.assign(new Error(`LOREMAX_BASE_URL must be an https:// URL (Settings → Integrations → LoreMax, or plugins.loremax.config.base_url), got "${raw.slice(0, 200)}"`), { config: true });
+    }
+    // every request path is appended to it: /api/mcp or a profile URL here sends each call to a page
+    // that answers 405, which the check would report as a refused key
+    let u;
+    try {
+      u = new URL(raw);
+    } catch {}
+    if (!u || u.pathname !== "/" || u.search || u.hash) {
+      throw Object.assign(new Error(`LOREMAX_BASE_URL must be LoreMax's address alone, like ${DEFAULT_BASE_URL} — no path, query or fragment; the MCP profile goes in profile_url (Settings → Integrations → LoreMax, or plugins.loremax.config.base_url), got "${raw.slice(0, 200)}"`), { config: true });
     }
     return raw;
   };

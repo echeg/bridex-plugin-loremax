@@ -39,6 +39,24 @@ test("base_url is https only: http and other schemes are a config error naming t
   assert.equal(fromConfig("HTTPS://lm.example.com")(), "HTTPS://lm.example.com");
 });
 
+test("base_url is an origin only: a path, query or fragment is a config error naming the setting and profile_url", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: undefined });
+  const fromConfig = (base_url) => () => createClient(fakeCtx({ config: { base_url } }).ctx).baseUrl();
+  // the MCP endpoint or the profile URL pasted into the address would be joined with every request path
+  for (const v of ["https://loremax.ai/api/mcp", "https://loremax.ai/api/mcp/s/AbCdEfGh12345678", "https://loremax.ai/app/", "https://loremax.ai?x=1", "https://loremax.ai#top"])
+    assert.throws(fromConfig(v), (e) =>
+      e.config === true && /LOREMAX_BASE_URL/.test(e.message) && /no path/.test(e.message) && /profile_url/.test(e.message) && e.message.includes(v.replace(/\/+$/, "")), v);
+  assert.equal(fromConfig("https://localhost:8788")(), "https://localhost:8788");
+});
+
+test("LOREMAX_BASE_URL with a path from the credential: needsConfig once at activate", async () => {
+  restoreEnv = withEnv({ LOREMAX_API_KEY: "lmx_prod_x", LOREMAX_BASE_URL: "https://lm.example.com/api/mcp" });
+  const { ctx, rec } = fakeCtx({ config: { profile_url: "https://lm.example.com/api/mcp/s/AbCdEfGh12345678" } });
+  await activate(ctx);
+  assert.equal(rec.needsConfig.length, 1);
+  assert.match(rec.needsConfig[0], /LOREMAX_BASE_URL must be LoreMax's address alone/);
+});
+
 test("LOREMAX_BASE_URL=http://… from the credential is refused the same way", () => {
   restoreEnv = withEnv({ LOREMAX_BASE_URL: "http://lm.example.com" });
   assert.throws(() => createClient(fakeCtx().ctx).baseUrl(), (e) => e.config === true && /LOREMAX_BASE_URL must be an https:\/\/ URL/.test(e.message));
