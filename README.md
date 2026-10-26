@@ -542,6 +542,17 @@ the watcher settles that row as failed and wakes the agent once: the submission
 was interrupted and may have been charged, so check LoreMax history before
 running it again.
 
+Every wake from one conversation — the watcher's, a background save's, a
+failed save's, a late submission's — uses one key,
+`loremax-wake:<workspace>:<agent>:<session>` (`service` when the call had no
+session). Bridex merges a wake into a pending one with the same key, so
+generations that finish while the agent is still busy reach it as one wake
+listing them all, not one run per generation. Each generation (and each
+submission) wakes the agent at most once per process. This does not cover an
+idle agent — with no wake pending, each finish starts a run of its own — nor
+results already read with `loremax_result`: a wake queued before that still
+arrives. Both need host support, see `docs/backlog/host-plugin-wake-events.md`.
+
 The plugin check reports whether the key works and the token balance (it fails
 with "balance is empty — top up LoreMax" when the key works but no tokens
 remain). In profile mode it reads the balance through the profile and rereads

@@ -109,9 +109,9 @@
 - [x] run full test suite (`npm test`)
 
 ### Task 4: [Final] Update documentation and version
-- [ ] README.md: in the background-save / watcher sections, state that wakes share one key per conversation, so finishes that land while the agent is busy reach it as one wake; name what it does not cover (an idle agent, results already read) with a pointer to the backlog
-- [ ] CHANGELOG.md: add `0.4.1 — <date>` with the change and both field reports as the reason
-- [ ] bump the version to 0.4.1 in `package.json`, `plugin.yaml` and `PLUGIN_VERSION` (`index.mjs:88`); run `npm test`
+- [x] README.md: in the background-save / watcher sections, state that wakes share one key per conversation, so finishes that land while the agent is busy reach it as one wake; name what it does not cover (an idle agent, results already read) with a pointer to the backlog
+- [x] CHANGELOG.md: add `0.4.1 — <date>` with the change and both field reports as the reason
+- [x] bump the version to 0.4.1 in `package.json`, `plugin.yaml` and `PLUGIN_VERSION` (`index.mjs:88`); run `npm test`
 
 ## Technical Details
 - Key: `loremax-wake:${workspace}:${agent}:${sessionKey || "service"}`. The agent is redundant for the host lookup but

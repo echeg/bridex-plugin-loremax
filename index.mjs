@@ -86,7 +86,7 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
 /** Sent as clientInfo in the profile's initialize; kept equal to package.json's and plugin.yaml's version (a test checks). */
-export const PLUGIN_VERSION = "0.4.0";
+export const PLUGIN_VERSION = "0.4.1";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /**
  * LoreMax appends its standard raw-MCP operating rules to a profile's

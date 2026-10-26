@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1 — 2026-10-26
+
+- Every wake now uses one key per conversation, `loremax-wake:<workspace>:<agent>:<session>`
+  (`service` without a session), instead of one per job row or submission. Bridex merges
+  a wake into a pending one with the same key, so generations that finish while the agent
+  is busy reach it as one wake. A process-wide set keeps one wake per generation and per
+  submission. Wake prompts are unchanged.
+- Why: two agent field reports. An agent that ran 25–36 generations got one "generation
+  finished" run per generation, each answering NO_REPLY; in the second the wakes kept
+  coming after the agent had collected every result with `loremax_result` and closed the
+  task (about 25 runs, now 1). An idle agent still gets one wake per finish, and a queued
+  wake cannot be withdrawn: see `docs/backlog/host-plugin-wake-events.md`.
+
 ## 0.4.0 — 2026-10-25
 
 - Add `loremax_upload` in REST and profile modes: upload workspace files or import

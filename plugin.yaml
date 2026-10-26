@@ -7,7 +7,7 @@
 # in-process facilities that a catalog "tool" plugin (out-of-process, flat
 # schemas) does not have.
 name: loremax
-version: 0.4.0
+version: 0.4.1
 kind: integration
 description: LoreMax workflows for agents — images, video, audio, 3D and text, from the whole organization or a curated MCP profile. Outputs land in the task's artifacts with provenance and token spend.
 entry: index.mjs
