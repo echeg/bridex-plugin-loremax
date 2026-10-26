@@ -34,7 +34,7 @@ test("profile check: balance and tools/list on the profile path, reports the gen
   const f = mockFetch([profileRoute()]);
   restore = f.restore;
   const s = await setup();
-  assert.deepEqual(await s.check(), { ok: true, message: "profile reachable, 3 tools · 750 tk left" });
+  assert.deepEqual(await s.check(), { ok: true, message: "profile reachable, 3 tools · 750 tk left (≈ $0.84)" });
   assert.ok(f.calls.every((c) => c.url === `${BASE}${PROFILE_PATH}`), "never the organization-wide /api/mcp");
   assert.ok(f.calls.every((c) => c.headers.authorization === "Bearer lmx_prod_k"));
   const balance = f.calls.find((c) => c.json.params?.name === "get_balance");
@@ -59,7 +59,7 @@ test("profile check: one tool is singular; a profile without generation tools fa
   const f = mockFetch([profileRoute({ tools: () => tools })]);
   restore = f.restore;
   const s = await setup();
-  assert.deepEqual(await s.check(), { ok: true, message: "profile reachable, 1 tool · 750 tk left" });
+  assert.deepEqual(await s.check(), { ok: true, message: "profile reachable, 1 tool · 750 tk left (≈ $0.84)" });
   tools = FIXTURE.result.tools.filter((t) => !t.inputSchema?.properties?.schema_revision);
   const r = await s.check();
   assert.equal(r.ok, false);
@@ -89,7 +89,22 @@ test("profile check: a refused key is reported like in REST mode", async () => {
   const f = mockFetch([profileRoute({ balance: () => new Response("Invalid API key", { status: 401 }) })]);
   restore = f.restore;
   const s = await setup();
-  assert.deepEqual(await s.check(), { ok: false, message: "LoreMax refused the key (401)" });
+  assert.deepEqual(await s.check(), { ok: false, message: "LoreMax refused the key (401) — paste a valid lmx_prod_… key from LoreMax → Organization → API keys" });
+});
+
+test("check: a 405 or a 5xx names the address, not the key; a price of 0 shows tokens only", async () => {
+  for (const status of [405, 502]) {
+    const f = mockFetch([profileRoute({ balance: () => new Response("nope", { status }) })]);
+    restore = f.restore;
+    const s = await setup();
+    assert.deepEqual(await s.check(), { ok: false, message: `LoreMax at ${BASE} answered ${status} — check the LoreMax address, or try again later` });
+    restore();
+  }
+  const f = mockFetch([["POST", "/api/mcp", (req) => mcpResult({ limit: 1000, used: 250, remaining: 750 }, req.json.id)]]);
+  restore = f.restore;
+  const { ctx, rec } = fakeCtx({ config: { api_key: "lmx_prod_k", base_url: BASE, usd_per_token: 0 } });
+  await activate(ctx);
+  assert.deepEqual(await rec.checks[0](), { ok: true, message: "key works · 750 tk left" });
 });
 
 test("invalid profile_url: the check fails with the config error and nothing is fetched", async () => {
@@ -124,7 +139,7 @@ test("REST mode: check and stat still read the balance on /api/mcp, with no tool
   const f = mockFetch([["POST", "/api/mcp", (req) => mcpResult({ limit: 1000, used: 250, remaining: 750 }, req.json.id)]]);
   restore = f.restore;
   const s = await setup("");
-  assert.deepEqual(await s.check(), { ok: true, message: "key works · 750 tk left" });
+  assert.deepEqual(await s.check(), { ok: true, message: "key works · 750 tk left (≈ $0.84)" });
   assert.deepEqual(await s.stat(), [{ label: "LoreMax balance", value: "750 tk", sub: "balance", balance: 0.75, low: false }]);
   assert.ok(f.calls.every((c) => c.url === `${BASE}/api/mcp` && c.json.params.name === "get_balance"));
 });
@@ -142,7 +157,7 @@ test("check: a redirect or an http:// base_url is reported as itself, not as a r
   await activate(ctx);
   const plain = await rec.checks[0]();
   assert.equal(plain.ok, false);
-  assert.match(plain.message, /LOREMAX_BASE_URL must be an https:\/\/ URL/);
+  assert.match(plain.message, /base_url must be an https:\/\/ URL/);
   assert.equal(f.calls.length, 1, "nothing is sent to an http:// base_url");
 });
 
@@ -154,7 +169,7 @@ test("check: a base_url with a path is reported as itself, not as a refused key 
   await activate(ctx);
   const r = await rec.checks[0]();
   assert.equal(r.ok, false);
-  assert.match(r.message, /LOREMAX_BASE_URL must be LoreMax's address alone/);
+  assert.match(r.message, /base_url must be LoreMax's address alone/);
   assert.doesNotMatch(r.message, /refused the key/);
   assert.equal(f.calls.length, 0, "nothing is sent to a base_url with a path");
 });

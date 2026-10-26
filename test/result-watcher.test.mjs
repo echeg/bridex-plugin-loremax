@@ -638,11 +638,11 @@ test("check: no key, a working key with a balance, an empty balance, a refused k
     return reply;
   }]]);
   restore = f.restore;
-  assert.deepEqual(await check(), { ok: true, message: "key works · 750 tk left" });
+  assert.deepEqual(await check(), { ok: true, message: "key works · 750 tk left (≈ $0.84)" });
   reply = mcpResult({ limit: 1000, used: 1000, remaining: 0 });
   assert.deepEqual(await check(), { ok: false, message: "key works, but the balance is empty — top up LoreMax" });
   reply = new Response("Invalid API key", { status: 401 });
-  assert.deepEqual(await check(), { ok: false, message: "LoreMax refused the key (401)" });
+  assert.deepEqual(await check(), { ok: false, message: "LoreMax refused the key (401) — paste a valid lmx_prod_… key from LoreMax → Organization → API keys" });
 });
 
 test("stat tile: balance share, low flag, cached for 60 s, [] on error", async () => {

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.0 — 2026-10-26
+
+- LoreMax's address is no longer a credential: `LOREMAX_BASE_URL` left `requires_env` and
+  `base_url` lost `credential:`. The plugin starts with the key alone; the address is
+  `base_url`, else `LOREMAX_BASE_URL` when the instance has it (the control plane, or a value
+  stored before 0.5.0), else `https://loremax.ai`. An env value with a path says it comes from
+  the environment and that the field overrides it.
+- `usd_per_token` defaults to 0.00112: 1000 LoreMax tokens are €1, at 1.12 USD/EUR
+  (2026-10-26). An empty or invalid value means the default; 0 records tokens only.
+- The settings form is in setup order: API key, MCP profile, profile editing, price, wait,
+  address. Descriptions say where to get the key and the profile URL in LoreMax.
+- The check shows the balance in USD too, and says "LoreMax refused the key" only for 401/403;
+  any other status names the address ("LoreMax at <base> answered 405").
+- Why: a field report. A user could not tell which value went where: the address showed
+  twice (masked in Keys like a secret, and again as a field), and a working key was reported
+  refused.
+
 ## 0.4.2 — 2026-10-26
 
 - `base_url` / `LOREMAX_BASE_URL` must be LoreMax's address alone (`https://loremax.ai`): a path,

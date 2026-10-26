@@ -7,13 +7,15 @@
 # in-process facilities that a catalog "tool" plugin (out-of-process, flat
 # schemas) does not have.
 name: loremax
-version: 0.4.2
+version: 0.5.0
 kind: integration
 description: LoreMax workflows for agents — images, video, audio, 3D and text, from the whole organization or a curated MCP profile. Outputs land in the task's artifacts with provenance and token spend.
 entry: index.mjs
 requires_env:
-  - LOREMAX_API_KEY    # managed credential: Settings → Integrations → LoreMax key (lmx_prod_…)
-  - LOREMAX_BASE_URL   # managed credential: LoreMax address — set it (https://loremax.ai) or the plugin won't start
+  - LOREMAX_API_KEY    # managed credential: the plugin form's Keys block, or Settings → Integrations → LoreMax key (lmx_prod_…)
+# LoreMax's address is not a credential: base_url below, else LOREMAX_BASE_URL when the
+# instance sets it (the control plane does on studios), else https://loremax.ai
+# Properties are in form order: what a person sets first comes first, the address last.
 config_schema:
   type: object
   properties:
@@ -23,13 +25,23 @@ config_schema:
       secret: true
       credential: LOREMAX_API_KEY
       placeholder: "${LOREMAX_API_KEY}"
-      description: Leave empty to use the LoreMax key from Settings → Integrations
-    base_url:
+      description: "lmx_prod_… — create it in LoreMax → Organization → API keys and paste it here"
+    profile_url:
       type: string
-      title: Base URL
-      credential: LOREMAX_BASE_URL
-      placeholder: "${LOREMAX_BASE_URL}"
-      description: default https://loremax.ai (https only, the address alone — no path)
+      title: MCP profile
+      placeholder: "https://loremax.ai/api/mcp/s/<publicId>"
+      description: "Optional. Copy the profile URL from LoreMax → Organization → MCP (or its bare 16-character publicId). Set, agents see only the profile's curated workflows; empty = every workflow of the organization"
+    allow_profile_edit:
+      type: boolean
+      title: Let agents edit the profile's texts
+      default: false
+      description: Profile mode only. On, agents get loremax_profile_edit and can rewrite the profile's description and its tools' descriptions in LoreMax — for every client of the profile, not only Bridex. Bindings, tool names and activation are never changed
+    usd_per_token:
+      type: number
+      title: USD per token
+      default: 0.00112
+      minimum: 0
+      description: "price of one LoreMax token in USD for the spend charts. Default 0.00112 = 1000 tokens for €1 at 1.12 USD/EUR (October 2026); 0 = record tokens only"
     default_wait_s:
       type: integer
       title: Wait before handing back, s
@@ -37,18 +49,8 @@ config_schema:
       minimum: 10
       maximum: 50
       description: "How long loremax_generate waits for a result before handing back (10..50 s: agents' MCP client gives up at 60 s)"
-    usd_per_token:
-      type: number
-      title: USD per token
-      minimum: 0
-      description: price of one LoreMax token in USD for the spend charts; empty = record tokens only
-    profile_url:
+    base_url:
       type: string
-      title: MCP profile
-      placeholder: "https://loremax.ai/api/mcp/s/<publicId>"
-      description: Optional. A LoreMax MCP profile (Organization → MCP) — its URL or bare 16-character publicId. Set, agents see only the profile's curated workflows; empty = every workflow of the organization
-    allow_profile_edit:
-      type: boolean
-      title: Let agents edit the profile's texts
-      default: false
-      description: Profile mode only. On, agents get loremax_profile_edit and can rewrite the profile's description and its tools' descriptions in LoreMax — for every client of the profile, not only Bridex. Bindings, tool names and activation are never changed
+      title: LoreMax address
+      placeholder: "https://loremax.ai"
+      description: "Leave empty for https://loremax.ai. Only for another LoreMax server — the address alone, https, no path (the profile goes in MCP profile)"

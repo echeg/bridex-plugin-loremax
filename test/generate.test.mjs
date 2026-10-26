@@ -946,6 +946,8 @@ test("profile happy path: uploads, injected revision and on_behalf_of, sync outp
     workflow: "masked-edit",
     artifacts: ["task-9/masked-edit-901.png"],
     tokens_cost: 7,
+    // the default price: 1000 tk = €1 ≈ $1.12
+    cost_usd: 7 * 0.00112,
     hint: "reference outputs as [media: artifacts/<path>]",
   });
   assert.equal(fs.readFileSync(path.join(s.art, "task-9/masked-edit-901.png"), "utf8"), "PNG");

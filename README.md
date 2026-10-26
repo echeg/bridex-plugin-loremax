@@ -34,15 +34,18 @@ restart: the generation ids live in memory there), and there is no card or tile.
 From the Bridex plugin catalog (Settings → Plugins → Catalog, or the operator
 MCP `plugin_admin install loremax`), then set the credentials:
 
-- **Settings → Integrations → LoreMax key** (`LOREMAX_API_KEY`, format
-  `lmx_prod_…`, created in LoreMax under API keys). Read per call — no restart
-  needed.
-- **Settings → Integrations → LoreMax address** (`LOREMAX_BASE_URL`) — usually
-  `https://loremax.ai`; the control plane sets it on studio instances.
+- **The LoreMax key** (`LOREMAX_API_KEY`, format `lmx_prod_…`, created in
+  LoreMax → Organization → API keys): paste it under **Keys** in the plugin's
+  settings, or in Settings → Integrations. Read per call — no restart needed.
+  It is the one `requires_env`: the host does not start the plugin until it is
+  set, and the plugin card shows `needs env: …` until then.
+- **MCP profile** (optional): the profile URL from LoreMax → Organization → MCP.
 
-Both are `requires_env`: the host does not start the plugin until both are set,
-and the plugin card shows `needs env: …` until then. Set `LOREMAX_BASE_URL` to
-`https://loremax.ai` even when LoreMax is at its default address.
+LoreMax's address is not a credential (since 0.5.0). It is `base_url` when set,
+else `LOREMAX_BASE_URL` when the instance has it (the control plane sets it on
+studios; a value stored in Settings before 0.5.0 still counts), else
+`https://loremax.ai`. The profile URL never sets it: a profile on another origin
+is refused, so a pasted profile link cannot take the key elsewhere.
 
 `base_url` and `profile_url` are **https only**: an `http://` value is a config
 error naming the setting. `base_url` is the address alone (`https://loremax.ai`):
@@ -61,11 +64,11 @@ plugins:
   loremax:
     config:
       api_key: ${LOREMAX_API_KEY}     # default
-      base_url: ${LOREMAX_BASE_URL}   # default; https:// only, the address alone (no path)
-      default_wait_s: 45              # how long loremax_generate waits before handing back (10..50; empty or invalid = 45)
-      usd_per_token: 0.001            # optional: tokens → USD for the spend charts; absent = tokens only
       profile_url: https://loremax.ai/api/mcp/s/AbCdEfGh12345678   # optional: profile mode (or the bare publicId)
       allow_profile_edit: false       # optional, profile mode only: agents get loremax_profile_edit (default false)
+      usd_per_token: 0.00112          # default: 1000 tk = €1 at 1.12 USD/EUR; 0 = tokens only; empty or invalid = default
+      default_wait_s: 45              # how long loremax_generate waits before handing back (10..50; empty or invalid = 45)
+      base_url: https://loremax.ai    # optional; empty = LOREMAX_BASE_URL, else this; https:// only, the address alone (no path)
 ```
 
 ## Profile mode
@@ -90,7 +93,7 @@ To use one:
          profile_url: https://loremax.ai/api/mcp/s/AbCdEfGh12345678
    ```
 
-The profile must be on the same LoreMax as `LOREMAX_BASE_URL` and belong to the
+The profile must be on the same LoreMax as the address (`base_url`) and belong to the
 organization of `LOREMAX_API_KEY`; the plugin calls it with the same key.
 
 With `profile_url` set, the plugin uses only the profile: there is one catalog
@@ -510,10 +513,10 @@ Each file's sidecar carries a description (`LoreMax <workflow> · generation
 | `workflow` | REST: the `workflow_id` as given. Profile: the workflow's visual id, else its title, else the tool name |
 | `params` | REST: the `inputs` as sent. Profile: the agent's `arguments` with workspace paths (not the uploaded URLs), plus `tool` and `profile` (the publicId). Both add `image_urls` — the reference paths, when there were any |
 | `externalId` | the LoreMax generation id |
-| `costUsd` | tokens × `usd_per_token`, only when that is set |
+| `costUsd` | tokens × `usd_per_token` (default 0.00112), absent when it is 0 |
 
 Spend lands in the dashboard usage charts under kind `loremax`, model = the
-workflow label, in tokens (`tk`), with USD when `usd_per_token` is set. It is
+workflow label, in tokens (`tk`), with USD unless `usd_per_token` is 0. It is
 recorded once per generation (keyed by the generation id), even when a restart
 finishes the same generation twice.
 
@@ -570,7 +573,9 @@ artifacts or LoreMax history. All three need host support, see
 
 The plugin check reports whether the key works and the token balance (it fails
 with "balance is empty — top up LoreMax" when the key works but no tokens
-remain). In profile mode it reads the balance through the profile and rereads
+remain), with its USD value at `usd_per_token`: "key works · 750 tk left (≈ $0.84)".
+Only a 401 or 403 is "LoreMax refused the key"; any other status names the
+address ("LoreMax at <base> answered 405 — check the LoreMax address"). In profile mode it reads the balance through the profile and rereads
 its tool list: "profile reachable, N tools · … tk left", failing when the profile
 has no workflows, when the key works but the tool list cannot be read, on a
 404 profile (with the three causes), an invalid `profile_url`, a `base_url`

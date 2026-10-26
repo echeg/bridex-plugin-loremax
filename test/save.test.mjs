@@ -73,10 +73,10 @@ test("finish: two outputs named by contentTypes, provenance, mirror, usage, sett
   assert.match(reply.hint, /\[media: artifacts\/<path>\]/);
 });
 
-test("finish: without usd_per_token spend is tokens only and params carry no image_urls", async () => {
+test("finish: usd_per_token 0 records tokens only and params carry no image_urls", async () => {
   const f = mockFetch([["GET", `${CDN}/one`, () => file("X", "image/jpeg")]]);
   restore = f.restore;
-  const s = setup();
+  const s = setup({ config: { usd_per_token: 0 } });
   const reply = await s.finish({ workspace: "studio", agent: "a" }, { generationId: 7, workflow: "12", inputs: { prompt: "p" }, tokensCost: 5 },
     { result: { originalUrls: [`${CDN}/one`] } });
   // a single output has no -N suffix; no taskId → the loremax folder; Content-Type decides the extension

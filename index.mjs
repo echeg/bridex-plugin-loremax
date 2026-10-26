@@ -26,14 +26,18 @@ const { GUIDE } = await import(new URL(`./guide.mjs${new URL(import.meta.url).se
  *     loremax:
  *       config:
  *         api_key: ${LOREMAX_API_KEY}     # optional; this is the default
- *         base_url: ${LOREMAX_BASE_URL}   # optional; this is the default, https:// only (the credential must be set: requires_env)
- *         default_wait_s: 45              # how long loremax_generate waits before handing back (10..50 s)
- *         usd_per_token: 0.001            # optional; tokens → USD for the spend charts
  *         profile_url: https://loremax.ai/api/mcp/s/<publicId>   # optional; a curated MCP profile (or its bare publicId)
  *         allow_profile_edit: false       # optional; profile mode only: agents may rewrite the profile's texts
+ *         usd_per_token: 0.00112          # optional; this is the default (1000 tk = €1); 0 = tokens only
+ *         default_wait_s: 45              # how long loremax_generate waits before handing back (10..50 s)
+ *         base_url: https://loremax.ai    # optional; empty = LOREMAX_BASE_URL if the instance sets it, else this; https only, no path
  */
 
 const DEFAULT_BASE_URL = "https://loremax.ai";
+const ENV_BASE_REF = "${LOREMAX_BASE_URL}";
+const BASE_HINT = "the plugin's LoreMax address field, plugins.loremax.config.base_url";
+/** 1000 LoreMax tokens are sold for €1; at 1.12 USD/EUR (2026-10-26) one token is $0.00112. */
+const DEFAULT_USD_PER_TOKEN = 0.00112;
 /** The process's one result watcher: `{ interval, generations, stop }` of the activation running it. */
 const WATCHER_SLOT = Symbol.for("bridex.loremax.watcher");
 /** LoreMax asks for Retry-After on 429; never sleep longer than this inside a tool call. */
@@ -86,7 +90,7 @@ const KEY_HINT = "LOREMAX_API_KEY is not set — Settings → Integrations → L
 const CATALOG_TTL_MS = 10 * 60_000;
 const CATALOG_REFRESH_CODES = new Set(["SCHEMA_REVISION_MISMATCH", "WORKFLOW_UNAVAILABLE", "TOOL_NOT_FOUND"]);
 /** Sent as clientInfo in the profile's initialize; kept equal to package.json's and plugin.yaml's version (a test checks). */
-export const PLUGIN_VERSION = "0.4.2";
+export const PLUGIN_VERSION = "0.5.0";
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 /**
  * LoreMax appends its standard raw-MCP operating rules to a profile's
@@ -193,11 +197,11 @@ function outcomeUnknown(e) {
 export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   const cfg = {
     api_key: "${LOREMAX_API_KEY}",
-    base_url: "${LOREMAX_BASE_URL}",
-    default_wait_s: DEFAULT_WAIT_S,
-    usd_per_token: 0,
     profile_url: "",
     allow_profile_edit: false,
+    usd_per_token: DEFAULT_USD_PER_TOKEN,
+    default_wait_s: DEFAULT_WAIT_S,
+    base_url: "",
     ...(ctx.config ?? {}),
   };
   // an emptied form field arrives as "" — fall back to the managed credential, not to nothing
@@ -207,12 +211,25 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
     if (!k) throw new Error(KEY_HINT);
     return k;
   };
+  /**
+   * LoreMax's address: base_url, else the instance's LOREMAX_BASE_URL (the
+   * control plane sets it on studios), else the default. Never the profile
+   * URL's origin: a profile link pasted from elsewhere would take the key with it.
+   */
   const baseUrl = () => {
-    const raw = resolveRef(cfg.base_url || "${LOREMAX_BASE_URL}").trim().replace(/\/+$/, "");
+    let raw = resolveRef(cfg.base_url ?? "").trim();
+    let name = "base_url";
+    if (!raw) {
+      raw = resolveRef(ENV_BASE_REF).trim();
+      name = "LOREMAX_BASE_URL";
+    }
+    raw = raw.replace(/\/+$/, "");
     if (!raw) return DEFAULT_BASE_URL;
+    // LOREMAX_BASE_URL is no longer on the plugin's form: say where the value comes from and what overrides it
+    const where = name === "base_url" ? BASE_HINT : `it comes from this instance's environment; ${BASE_HINT} overrides it`;
     // the key rides on every request: never in clear text
     if (!/^https:\/\/[^/]/i.test(raw)) {
-      throw Object.assign(new Error(`LOREMAX_BASE_URL must be an https:// URL (Settings → Integrations → LoreMax, or plugins.loremax.config.base_url), got "${raw.slice(0, 200)}"`), { config: true });
+      throw Object.assign(new Error(`loremax ${name} must be an https:// URL (${where}), got "${raw.slice(0, 200)}"`), { config: true });
     }
     // every request path is appended to it: /api/mcp or a profile URL here sends each call to a page
     // that answers 405, which the check would report as a refused key
@@ -221,7 +238,7 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
       u = new URL(raw);
     } catch {}
     if (!u || u.pathname !== "/" || u.search || u.hash) {
-      throw Object.assign(new Error(`LOREMAX_BASE_URL must be LoreMax's address alone, like ${DEFAULT_BASE_URL} — no path, query or fragment; the MCP profile goes in profile_url (Settings → Integrations → LoreMax, or plugins.loremax.config.base_url), got "${raw.slice(0, 200)}"`), { config: true });
+      throw Object.assign(new Error(`loremax ${name} must be LoreMax's address alone, like ${DEFAULT_BASE_URL} — no path, query or fragment; the MCP profile goes in profile_url (${where}), got "${raw.slice(0, 200)}"`), { config: true });
     }
     return raw;
   };
@@ -251,9 +268,11 @@ export function createClient(ctx, { now = Date.now, sleep = realSleep } = {}) {
   };
   // rewrites texts every client of the profile sees: on only for a literal true, never a "true" string
   const allowProfileEdit = () => cfg.allow_profile_edit === true;
+  // an emptied or bogus value means LoreMax's list price; only an explicit 0 records tokens alone
   const usdPerToken = () => {
-    const v = Number(cfg.usd_per_token ?? 0);
-    return Number.isFinite(v) && v > 0 ? v : 0;
+    const raw = cfg.usd_per_token;
+    const v = raw === null || raw === "" ? NaN : Number(raw);
+    return Number.isFinite(v) && v >= 0 ? v : DEFAULT_USD_PER_TOKEN;
   };
   // the host leaves config validation to the plugin: an emptied or bogus value means the default, not "no wait"
   const defaultWaitS = () => {
@@ -2767,9 +2786,11 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     try {
       const b = await balance({ timeoutMs: 15_000 });
       const remaining = Number(b?.remaining);
+      const usd = remaining * lmx.usdPerToken();
+      const left = `${remaining} tk left${usd > 0 ? ` (≈ $${usd.toFixed(2)})` : ""}`;
       if (!profile) {
         return remaining > 0
-          ? { ok: true, message: `key works · ${remaining} tk left` }
+          ? { ok: true, message: `key works · ${left}` }
           : { ok: false, message: "key works, but the balance is empty — top up LoreMax" };
       }
       // the check is the one place a person asks "is it set up?": reread the catalog, not the cached one
@@ -2783,12 +2804,16 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
       const reach = `profile reachable, ${n} tool${n === 1 ? "" : "s"}`;
       if (n === 0) return { ok: false, message: `${reach} — add workflows to the profile in LoreMax → Organization → MCP` };
       return remaining > 0
-        ? { ok: true, message: `${reach} · ${remaining} tk left` }
+        ? { ok: true, message: `${reach} · ${left}` }
         : { ok: false, message: `${reach}, but the balance is empty — top up LoreMax` };
     } catch (e) {
       // these messages already name the cause and the fix: a 404 profile, a config error, a refused redirect
       if (e?.code === "PROFILE_NOT_FOUND" || e?.config || e?.status === 0) return { ok: false, message: e.message };
-      return { ok: false, message: `LoreMax refused the key (${e?.status ?? short(e?.message ?? e)})` };
+      // only an auth status is about the key: a 405 or a 5xx is the address or LoreMax itself
+      if (e?.status === 401 || e?.status === 403)
+        return { ok: false, message: `LoreMax refused the key (${e.status}) — paste a valid lmx_prod_… key from LoreMax → Organization → API keys` };
+      const what = e?.status ? `answered ${e.status}` : `did not answer (${short(e?.message ?? e)})`;
+      return { ok: false, message: `LoreMax at ${lmx.baseUrl()} ${what} — check the LoreMax address, or try again later` };
     }
   });
 

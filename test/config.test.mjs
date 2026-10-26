@@ -30,12 +30,28 @@ test("base_url from the credential loses trailing slashes", () => {
   assert.equal(createClient(fakeCtx({ config: { base_url: "https://localhost:8788/" } }).ctx).baseUrl(), "https://localhost:8788");
 });
 
+test("base_url: the field wins over LOREMAX_BASE_URL; ${LOREMAX_BASE_URL} (the pre-0.5 default) reads the env", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: "https://lm.env.example.com" });
+  const base = (config) => createClient(fakeCtx({ config }).ctx).baseUrl();
+  assert.equal(base({}), "https://lm.env.example.com");
+  assert.equal(base({ base_url: "" }), "https://lm.env.example.com");
+  assert.equal(base({ base_url: "${LOREMAX_BASE_URL}" }), "https://lm.env.example.com");
+  assert.equal(base({ base_url: "https://lm.own.example.com" }), "https://lm.own.example.com");
+});
+
+test("base_url: a profile URL never sets the address — a foreign one is refused, not followed", () => {
+  restoreEnv = withEnv({ LOREMAX_BASE_URL: undefined });
+  const c = createClient(fakeCtx({ config: { profile_url: "https://lm.other.example.com/api/mcp/s/AbCdEfGh12345678" } }).ctx);
+  assert.equal(c.baseUrl(), "https://loremax.ai");
+  assert.throws(() => c.profilePath(), /is on https:\/\/lm\.other\.example\.com, not on the LoreMax base URL https:\/\/loremax\.ai/);
+});
+
 test("base_url is https only: http and other schemes are a config error naming the setting", () => {
   restoreEnv = withEnv({ LOREMAX_BASE_URL: undefined });
   const fromConfig = (base_url) => () => createClient(fakeCtx({ config: { base_url } }).ctx).baseUrl();
   for (const v of ["http://loremax.ai", "HTTP://localhost:8788", "ftp://loremax.ai", "loremax.ai"])
     assert.throws(fromConfig(v), (e) =>
-      e.config === true && /LOREMAX_BASE_URL/.test(e.message) && /plugins\.loremax\.config\.base_url/.test(e.message) && /https/.test(e.message) && e.message.includes(v));
+      e.config === true && /loremax base_url must be/.test(e.message) && /plugins\.loremax\.config\.base_url/.test(e.message) && /https/.test(e.message) && e.message.includes(v));
   assert.equal(fromConfig("HTTPS://lm.example.com")(), "HTTPS://lm.example.com");
 });
 
@@ -45,7 +61,7 @@ test("base_url is an origin only: a path, query or fragment is a config error na
   // the MCP endpoint or the profile URL pasted into the address would be joined with every request path
   for (const v of ["https://loremax.ai/api/mcp", "https://loremax.ai/api/mcp/s/AbCdEfGh12345678", "https://loremax.ai/app/", "https://loremax.ai?x=1", "https://loremax.ai#top"])
     assert.throws(fromConfig(v), (e) =>
-      e.config === true && /LOREMAX_BASE_URL/.test(e.message) && /no path/.test(e.message) && /profile_url/.test(e.message) && e.message.includes(v.replace(/\/+$/, "")), v);
+      e.config === true && /loremax base_url must be/.test(e.message) && /no path/.test(e.message) && /profile_url/.test(e.message) && e.message.includes(v.replace(/\/+$/, "")), v);
   assert.equal(fromConfig("https://localhost:8788")(), "https://localhost:8788");
 });
 
@@ -54,7 +70,9 @@ test("LOREMAX_BASE_URL with a path from the credential: needsConfig once at acti
   const { ctx, rec } = fakeCtx({ config: { profile_url: "https://lm.example.com/api/mcp/s/AbCdEfGh12345678" } });
   await activate(ctx);
   assert.equal(rec.needsConfig.length, 1);
+  // the env is no longer on the plugin's form: the message says where it comes from and what overrides it
   assert.match(rec.needsConfig[0], /LOREMAX_BASE_URL must be LoreMax's address alone/);
+  assert.match(rec.needsConfig[0], /instance's environment; the plugin's LoreMax address field, plugins\.loremax\.config\.base_url overrides it/);
 });
 
 test("LOREMAX_BASE_URL=http://… from the credential is refused the same way", () => {
@@ -62,11 +80,11 @@ test("LOREMAX_BASE_URL=http://… from the credential is refused the same way", 
   assert.throws(() => createClient(fakeCtx().ctx).baseUrl(), (e) => e.config === true && /LOREMAX_BASE_URL must be an https:\/\/ URL/.test(e.message));
 });
 
-test("usd_per_token: unset, empty or negative → 0", () => {
-  assert.equal(createClient(fakeCtx().ctx).usdPerToken(), 0);
-  assert.equal(createClient(fakeCtx({ config: { usd_per_token: null } }).ctx).usdPerToken(), 0);
-  assert.equal(createClient(fakeCtx({ config: { usd_per_token: -1 } }).ctx).usdPerToken(), 0);
-  assert.equal(createClient(fakeCtx({ config: { usd_per_token: 0.002 } }).ctx).usdPerToken(), 0.002);
+test("usd_per_token: unset, empty or bogus → the list price (1000 tk = €1 ≈ $1.12); 0 → tokens only", () => {
+  const price = (config) => createClient(fakeCtx({ config }).ctx).usdPerToken();
+  for (const usd_per_token of [undefined, null, "", -1, "abc"]) assert.equal(price({ usd_per_token }), 0.00112, String(usd_per_token));
+  assert.equal(price({ usd_per_token: 0 }), 0);
+  assert.equal(price({ usd_per_token: 0.002 }), 0.002);
 });
 
 test("missing key: needsConfig once at activate, every call throws the Settings hint before any HTTP", async () => {
@@ -98,7 +116,7 @@ test("http:// base_url: needsConfig once at activate (REST, or a full profile_ur
     const { ctx, rec } = fakeCtx({ config: { base_url: "http://lm.example.com", ...(profile_url ? { profile_url } : {}) } });
     await activate(ctx);
     assert.equal(rec.needsConfig.length, 1, `profile_url ${profile_url}`);
-    assert.match(rec.needsConfig[0], /LOREMAX_BASE_URL must be an https:\/\/ URL/);
+    assert.match(rec.needsConfig[0], /base_url must be an https:\/\/ URL/);
   }
 });
 
