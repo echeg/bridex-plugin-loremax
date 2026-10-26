@@ -95,12 +95,12 @@
 - [x] run `npm test` - must pass before task 2
 
 ### Task 2: Route the submission and background-save wakes through the helper
-- [ ] route `wakeSubmit` (~2213) through `wakeOnce` with `onceId` `submit:<submitId>`, target from `ph.call`
-- [ ] route the past-deadline save wake in `waitFor` (~2563) with `onceId` `job:<trackedId>`, the same id the watcher uses for that row, and replace the "the watcher's key for this row" comment
-- [ ] update `test/generate.test.mjs:499-500, 640, 679` to the new key
-- [ ] write tests: a late submission (REST and profile) and a background save for the same session as a watcher-woken job share its key
-- [ ] write tests: a background save that woke for a row is not woken again by a following `watchOnce`; a late submission that fails still wakes (error path)
-- [ ] run `npm test` - must pass before task 3
+- [x] route `wakeSubmit` (~2213) through `wakeOnce` with `onceId` `submit:<submitId>`, target from `ph.call`
+- [x] route the past-deadline save wake in `waitFor` (~2563) with `onceId` `job:<trackedId>`, the same id the watcher uses for that row, and replace the "the watcher's key for this row" comment
+- [x] update `test/generate.test.mjs:499-500, 640, 679` to the new key
+- [x] write tests: a late submission (REST and profile) and a background save for the same session as a watcher-woken job share its key
+- [x] write tests: a background save that woke for a row is not woken again by a following `watchOnce`; a late submission that fails still wakes (error path)
+- [x] run `npm test` - must pass before task 3
 
 ### Task 3: Verify acceptance criteria
 - [ ] verify no `ctx.wakeAgent(` call is left outside `wakeOnce` (`grep -n "wakeAgent" index.mjs`)

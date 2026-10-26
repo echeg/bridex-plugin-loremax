@@ -2231,14 +2231,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     return out;
   }
 
-  const wakeSubmit = (ph, prompt) =>
-    ctx.wakeAgent({
-      workspace: ph.call.workspace,
-      agent: ph.call.agent,
-      key: `loremax-${ph.submitId}`,
-      ...(ph.call.sessionKey ? { sessionKey: ph.call.sessionKey } : {}),
-      prompt,
-    });
+  const wakeSubmit = (ph, prompt) => wakeOnce(ph.call, prompt, ph.submitId);
 
   /**
    * The generation's own job row takes over from the placeholder before it goes:
@@ -2581,14 +2574,12 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           if (error) return ctx.log.warn(`loremax ${generationId}: saving its outputs failed: ${error?.message ?? error}`);
           generations.delete(generationId);
           const label = jobLabel(job.note, job.tokensCost);
-          ctx.wakeAgent({
-            workspace: call.workspace,
-            agent: call.agent,
-            // the watcher's key for this row: one wake per generation
-            key: `loremax-job:${trackedId}`,
-            ...(call.sessionKey ? { sessionKey: call.sessionKey } : {}),
-            prompt: `LoreMax generation ${generationId} (${job.workflow || "workflow"} — ${label}) finished: ${savedList(done)} — check them, then continue where you left off${call.taskId ? ` (task ${call.taskId})` : ""}.`,
-          });
+          // the watcher's once-id for this row: one wake per generation
+          wakeOnce(
+            call,
+            `LoreMax generation ${generationId} (${job.workflow || "workflow"} — ${label}) finished: ${savedList(done)} — check them, then continue where you left off${call.taskId ? ` (task ${call.taskId})` : ""}.`,
+            `job:${trackedId}`,
+          );
         })
         .catch((e) => ctx.log.warn(`loremax ${generationId}: ${e?.message ?? e}`));
       return beingSaved(generationId, job.tokensCost);

@@ -8,6 +8,8 @@ import { fakeCtx, mockFetch, jsonResponse, mcpResult, fakeSleep, eventually, gen
 const BASE = "https://lm.test";
 const CDN = "https://cdn.lm.test";
 const CALL = { workspace: "studio", agent: "illustrator", taskId: "task-9", sessionKey: "sess-1", runId: "run-1" };
+/** CALL's conversation wake key: every wake of its session shares it. */
+const KEY = "loremax-wake:studio:illustrator:sess-1";
 
 /**
  * activate with a fake clock: each /check advances it by `tick` ms and so does every sleep,
@@ -496,8 +498,7 @@ test("slow synchronous execute: replies submitting, then saves, bills and wakes 
   gate.open();
   await eventually(() => s.rec.wakes.length === 1, "the wake");
   const w = s.rec.wakes[0];
-  assert.match(w.key, /^loremax-submit:[0-9a-f-]{36}$/);
-  assert.equal(w.key, `loremax-${s.placeholders()[0].externalId}`);
+  assert.equal(w.key, KEY);
   assert.equal(w.sessionKey, "sess-1");
   assert.match(w.prompt, /generation 777 finished: artifacts\/task-9\/flux-portrait-777\.png/);
   assert.ok(fs.existsSync(path.join(s.art, "task-9/flux-portrait-777.png")));
@@ -536,6 +537,7 @@ test("slow async execute: replies submitting, then tracks the generation; the wa
   assert.equal(s.gens()[0].status, "succeeded");
   assert.equal(s.rec.wakes.length, 1);
   assert.match(s.rec.wakes[0].prompt, /LoreMax generation 501 .*finished: artifacts\/task-9\/kling-501\.png/);
+  assert.equal(s.rec.wakes[0].key, KEY);
   assert.equal(s.rec.usage.length, 1);
 });
 
@@ -556,6 +558,7 @@ test("a late definite failure wakes with LoreMax's error; an ambiguous one with 
     gate.open();
     await eventually(() => s.rec.wakes.length === 1, "the wake");
     assert.match(s.rec.wakes[0].prompt, /^LoreMax w \(hero\)/);
+    assert.equal(s.rec.wakes[0].key, KEY);
     assert.match(s.rec.wakes[0].prompt, expect);
     assert.doesNotMatch(s.rec.wakes[0].prompt, not);
     assert.equal(s.placeholders()[0].status, "failed");
@@ -637,7 +640,7 @@ test("a synchronous result whose downloads outlast the deadline: the reply comes
 
   gate.open();
   await eventually(() => s.rec.wakes.length === 1, "the wake");
-  assert.equal(s.rec.wakes[0].key, `loremax-${s.placeholders()[0].externalId}`);
+  assert.equal(s.rec.wakes[0].key, KEY);
   assert.match(s.rec.wakes[0].prompt, /generation 777 finished: artifacts\/task-9\/kling-777\.mp4/);
   assert.ok(fs.existsSync(path.join(s.art, "task-9/kling-777.mp4")));
   assert.equal(s.rec.usage.length, 1);
@@ -676,7 +679,7 @@ test("a polled generation whose downloads outlast the deadline: saved in the bac
   gate.open();
   await eventually(() => s.rec.wakes.length === 1, "the wake");
   const w = s.rec.wakes[0];
-  assert.equal(w.key, `loremax-job:${s.gens()[0].id}`);
+  assert.equal(w.key, KEY);
   assert.equal(w.sessionKey, "sess-1");
   assert.match(w.prompt, /LoreMax generation 501 \(w — p · 12 tk\) finished: artifacts\/task-9\/w-501\.png .*\(task task-9\)/);
   assert.equal(s.gens()[0].status, "succeeded");
@@ -685,6 +688,81 @@ test("a polled generation whose downloads outlast the deadline: saved in the bac
   assert.equal(s.rec.wakes.length, 1);
   assert.equal(downloads(), 1);
   assert.equal(s.rec.usage.length, 1);
+});
+
+test("a background save that woke for a row is not woken again by the watcher, even when a core reports the row pending again", async () => {
+  // an older core without find() whose settle of the generation's row did not stick: the watcher picks it up again
+  const s = await setup({
+    patch: (ctx) => {
+      delete ctx.jobs.find;
+      const settle = ctx.jobs.settle;
+      ctx.jobs.settle = (id, outcome) => {
+        if (String(ctx.jobs.pending().find((j) => j.id === id)?.externalId).startsWith("submit:")) settle(id, outcome);
+      };
+    },
+  });
+  const gate = held();
+  const f = mockFetch([
+    ["POST", "/api/v2/workflow/execute", () => EXECUTE],
+    checkRoute(s, [DONE]),
+    ["GET", `${CDN}/out.png`, async () => {
+      await gate.until;
+      return new Response("PNG", { headers: { "content-type": "image/png" } });
+    }],
+  ]);
+  restore = f.restore;
+  const replying = s.run({ workflow_id: "w", inputs: { prompt: "p" } });
+  await eventually(() => f.calls.some((c) => c.url.endsWith("/out.png")), "the download");
+  await s.time.expire();
+  assert.equal((await replying).status, "in_progress");
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 1, "the background save's wake");
+  await s.watchOnce();
+  // the watcher finished it again, but that generation was already woken
+  assert.equal(s.ctx.jobs.pending().length, 1);
+  assert.equal(f.calls.filter((c) => c.url.endsWith("/out.png")).length, 2);
+  assert.equal(s.rec.wakes.length, 1);
+});
+
+test("late submissions wake their own conversation: another session gets its own key, none gets the service key", async () => {
+  for (const [call, key] of [
+    [{ ...CALL, sessionKey: "sess-2" }, "loremax-wake:studio:illustrator:sess-2"],
+    [{ ...CALL, sessionKey: undefined }, "loremax-wake:studio:illustrator:service"],
+  ]) {
+    const s = await setup();
+    const gate = held();
+    restore = mockFetch([["POST", "/api/v2/workflow/execute", async () => {
+      await gate.until;
+      return jsonResponse({ error: "workflow crashed", status: "failed" }, 500);
+    }]]).restore;
+    const replying = s.run({ workflow_id: "w", inputs: {} }, call);
+    await s.time.expire();
+    assert.equal((await replying).status, "submitting");
+    gate.open();
+    await eventually(() => s.rec.wakes.length === 1, "the wake");
+    assert.equal(s.rec.wakes[0].key, key);
+    assert.equal(s.rec.wakes[0].sessionKey, call.sessionKey);
+    assert.equal("sessionKey" in s.rec.wakes[0], Boolean(call.sessionKey));
+    restore();
+  }
+});
+
+test("two late submissions of one session that fail both wake, on the conversation's one key", async () => {
+  const s = await setup();
+  const gate = held();
+  restore = mockFetch([["POST", "/api/v2/workflow/execute", async () => {
+    await gate.until;
+    return jsonResponse({ error: "workflow crashed", status: "failed" }, 500);
+  }]]).restore;
+  for (const note of ["one", "two"]) {
+    const replying = s.run({ workflow_id: "w", inputs: { prompt: note }, note });
+    await s.time.expire();
+    assert.equal((await replying).status, "submitting");
+  }
+  gate.open();
+  await eventually(() => s.rec.wakes.length === 2, "both wakes");
+  assert.deepEqual(s.rec.wakes.map((w) => w.key), [KEY, KEY]);
+  assert.deepEqual(s.rec.wakes.map((w) => w.prompt.match(/^LoreMax w \((\w+)\) FAILED/)[1]).sort(), ["one", "two"]);
 });
 
 test("older core without wakeAgent: a slow download blocks the call as in 0.1.0 and is saved inline", async () => {
@@ -1154,6 +1232,7 @@ test("profile: slow uploads reply submitting; the paid call runs after, and the 
   await eventually(() => s.rec.wakes.length === 1, "the wake");
   assert.equal(s.genCalls().length, 1);
   assert.match(s.rec.wakes[0].prompt, /^LoreMax masked_edit \(late\) — generation 902 finished: artifacts\/task-9\/masked-edit-902\.png/);
+  assert.equal(s.rec.wakes[0].key, KEY);
   assert.equal(s.rec.usage.length, 1);
   assert.equal(s.placeholders()[0].status, "succeeded");
   assert.equal(s.ctx.jobs.pending().length, 0);
@@ -1174,6 +1253,7 @@ test("profile: a refusal after submitting wakes with the not-charged reason", as
   gate.open();
   await eventually(() => s.rec.wakes.length === 1, "the wake");
   assert.match(s.rec.wakes[0].prompt, /was refused before it ran \(not charged\): .*source is too small — issues: .*min 64px/);
+  assert.equal(s.rec.wakes[0].key, KEY);
   nothingCharged(s);
 });
 
