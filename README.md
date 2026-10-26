@@ -556,7 +556,13 @@ with no generation id names the submission —
 lines. This does not cover an
 idle agent — with no wake pending, each finish starts a run of its own — nor
 results already read with `loremax_result`: a wake queued before that still
-arrives. Both need host support, see `docs/backlog/host-plugin-wake-events.md`.
+arrives. One shared wake also has one retry budget: while the agent's runs fail
+on a usage limit, each finish that merges into the waiting wake makes Bridex
+rerun it at once and spends a retry, so a burst of finishes in that window can
+use up `wakeup_retries` (6 by default) and drop the wake with every line in it.
+The files are still saved; after a usage-limit window, check the task's
+artifacts or LoreMax history. All three need host support, see
+`docs/backlog/host-plugin-wake-events.md`.
 
 The plugin check reports whether the key works and the token balance (it fails
 with "balance is empty — top up LoreMax" when the key works but no tokens

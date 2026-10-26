@@ -13,7 +13,8 @@
 - Integration: one helper replaces the four `ctx.wakeAgent` call sites; it also keeps "one wake per generation" inside
   the process, which the per-row key used to give.
 - Out of scope (filed in `docs/backlog/`): an idle agent still gets one wake per finish, queued wakes cannot be
-  retracted after `loremax_result`, and settle-then-wake is not atomic (`host-plugin-wake-events.md`); the opt-in
+  retracted after `loremax_result`, settle-then-wake is not atomic, and a merge into a wake retrying on a usage limit
+  reruns it at once and spends one of its retries (`host-plugin-wake-events.md`); the opt-in
   `batch` label (`loremax-generate-batch-wake.md`).
 
 ## Decisions

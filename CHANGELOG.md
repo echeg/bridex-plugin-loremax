@@ -14,7 +14,10 @@
   finished" run per generation, each answering NO_REPLY; in the second the wakes kept
   coming after the agent had collected every result with `loremax_result` and closed the
   task (about 25 runs, now 1). An idle agent still gets one wake per finish, and a queued
-  wake cannot be withdrawn: see `docs/backlog/host-plugin-wake-events.md`.
+  wake cannot be withdrawn. A merged wake shares one retry budget: during a usage-limit
+  window each finish that merges reruns it at once and spends a retry, so a burst can use
+  up `wakeup_retries` and drop every line in it (the files are still saved). All three need
+  host support: see `docs/backlog/host-plugin-wake-events.md`.
 
 ## 0.4.0 — 2026-10-25
 
