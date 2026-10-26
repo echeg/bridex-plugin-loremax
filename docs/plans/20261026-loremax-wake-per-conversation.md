@@ -86,13 +86,13 @@
 ## Implementation Steps
 
 ### Task 1: Add the conversation wake helper and route the watcher through it
-- [ ] add `wakeKey({ workspace, agent, sessionKey })` in `index.mjs` → `loremax-wake:<workspace>:<agent>:<sessionKey || "service">`, with a comment on why the workspace is in it (the host's merge lookup has none)
-- [ ] add `wakeOnce(target, prompt, onceId)` in `activate`: skips an `onceId` already woken in this process (a `Set` under `globalThis[Symbol.for("bridex.loremax.woken")]`, like `inFlight`), else calls `ctx.wakeAgent?.({ workspace, agent, key: wakeKey(target), ...(sessionKey ? { sessionKey } : {}), prompt })`
-- [ ] route the watcher's `wake` (~2634) through it with `onceId` `job:<row id>`, and the save-failed wake (~2674) with `save:<row id>`; keep the prompts unchanged
-- [ ] update `test/result-watcher.test.mjs:130` and `:163` to the new key
-- [ ] write tests: two finished jobs of the same session share one key; jobs of another session, another workspace and another agent get different keys; a row without `sessionKey` gets the `service` key and no `sessionKey` in the wake
-- [ ] write tests: the same `job:<row id>` is not woken twice in one process (e.g. a second `watchOnce` after the row is reported pending again by a fake core without `find()`); a save failure followed by a successful save wakes twice (`save:` then `job:`)
-- [ ] run `npm test` - must pass before task 2
+- [x] add `wakeKey({ workspace, agent, sessionKey })` in `index.mjs` → `loremax-wake:<workspace>:<agent>:<sessionKey || "service">`, with a comment on why the workspace is in it (the host's merge lookup has none)
+- [x] add `wakeOnce(target, prompt, onceId)` in `activate`: skips an `onceId` already woken in this process (a `Set` under `globalThis[Symbol.for("bridex.loremax.woken")]`, like `inFlight`), else calls `ctx.wakeAgent?.({ workspace, agent, key: wakeKey(target), ...(sessionKey ? { sessionKey } : {}), prompt })`
+- [x] route the watcher's `wake` (~2634) through it with `onceId` `job:<row id>`, and the save-failed wake (~2674) with `save:<row id>`; keep the prompts unchanged
+- [x] update `test/result-watcher.test.mjs:130` and `:163` to the new key
+- [x] write tests: two finished jobs of the same session share one key; jobs of another session, another workspace and another agent get different keys; a row without `sessionKey` gets the `service` key and no `sessionKey` in the wake
+- [x] write tests: the same `job:<row id>` is not woken twice in one process (e.g. a second `watchOnce` after the row is reported pending again by a fake core without `find()`); a save failure followed by a successful save wakes twice (`save:` then `job:`)
+- [x] run `npm test` - must pass before task 2
 
 ### Task 2: Route the submission and background-save wakes through the helper
 - [ ] route `wakeSubmit` (~2213) through `wakeOnce` with `onceId` `submit:<submitId>`, target from `ph.call`

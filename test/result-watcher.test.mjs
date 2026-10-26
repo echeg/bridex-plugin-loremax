@@ -127,7 +127,7 @@ test("watcher: finishes a pending job, settles it and wakes the agent with the a
   assert.equal(w.workspace, "studio");
   assert.equal(w.agent, "illustrator");
   assert.equal(w.sessionKey, "sess-1");
-  assert.equal(w.key, `loremax-job:${s.jobs[0].id}`);
+  assert.equal(w.key, "loremax-wake:studio:illustrator:sess-1");
   assert.match(w.prompt, /LoreMax generation 501 \(flux-portrait — hero\) finished: artifacts\/task-9\/flux-portrait-501\.png/);
   assert.equal(s.rec.usage[0].model, "flux-portrait");
   // one spend per generation on the host, however often a crash makes it finish again
@@ -160,7 +160,7 @@ test("watcher: a finished job whose save fails wakes once, is not downloaded aga
   assert.equal(s.jobs[0].status, "running");
   assert.equal(s.rec.wakes.length, 1);
   assert.match(s.rec.wakes[0].prompt, /501 .*finished, but saving its outputs failed: .*loremax_result/);
-  assert.equal(s.rec.wakes[0].key, `loremax-save:${s.jobs[0].id}`);
+  assert.equal(s.rec.wakes[0].key, "loremax-wake:studio:illustrator:sess-1");
   const calls = f.calls.length;
   // later passes leave it to loremax_result: no /check, no download, no second wake
   await s.watchOnce();
@@ -192,6 +192,69 @@ test("watcher: a finished job whose save still fails after 6h is settled failed 
   assert.match(s.jobs[0].error, /^saving its outputs failed: /);
   assert.equal(s.rec.wakes.length, 2);
   assert.match(s.rec.wakes[1].prompt, /still failed after 6h/);
+});
+
+test("watcher: wakes share one key per conversation — another session, workspace or agent gets its own", async () => {
+  const s = await setup();
+  s.track();
+  s.track({ externalId: "502" });
+  s.track({ externalId: "503", sessionKey: "sess-2" });
+  s.track({ externalId: "504", workspace: "other" });
+  s.track({ externalId: "505", agent: "writer" });
+  s.track({ externalId: "506", sessionKey: undefined });
+  const f = mockFetch([["POST", /\/api\/v2\/generations\/\d+\/check/, () => ({ status: "failed", error: "GPU OOM" })]]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.rec.wakes.length, 6);
+  const by = Object.fromEntries(s.rec.wakes.map((w) => [w.prompt.match(/generation (\d+)/)[1], w]));
+  assert.equal(by["501"].key, "loremax-wake:studio:illustrator:sess-1");
+  assert.equal(by["502"].key, by["501"].key);
+  assert.equal(by["503"].key, "loremax-wake:studio:illustrator:sess-2");
+  assert.equal(by["504"].key, "loremax-wake:other:illustrator:sess-1");
+  assert.equal(by["504"].workspace, "other");
+  assert.equal(by["505"].key, "loremax-wake:studio:writer:sess-1");
+  assert.equal(by["505"].agent, "writer");
+  // no session: the host runs it in the agent's service session
+  assert.equal(by["506"].key, "loremax-wake:studio:illustrator:service");
+  assert.equal("sessionKey" in by["506"], false);
+});
+
+test("watcher: a row woken once is not woken again in this process, even when a core reports it pending again", async () => {
+  const s = await setup();
+  s.track();
+  // an older core without find() whose settle did not stick: the row comes back pending
+  delete s.ctx.jobs.find;
+  s.ctx.jobs.settle = () => {};
+  const f = mockFetch([checkRoute(s, [{ status: "failed", error: "GPU OOM" }])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.rec.wakes.length, 1);
+  s.clock.t += 60_000;
+  await s.watchOnce();
+  // checked again, but its outcome was already woken
+  assert.equal(f.calls.length, 2);
+  assert.equal(s.rec.wakes.length, 1);
+});
+
+test("watcher: a save failure then a successful save wake twice, on the conversation's one key", async () => {
+  const s = await setup();
+  s.track({ model: "story" });
+  fs.mkdirSync(s.art, { recursive: true });
+  fs.writeFileSync(path.join(s.art, "task-9"), "not a folder");
+  const f = mockFetch([checkRoute(s, [{ status: "completed", result: { originalUrls: [], previewUrls: [], contentTypes: [], textContent: "The end." } }])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /saving its outputs failed/);
+  // the folder is free again; the watcher retries the save once the 6h give-up comes round
+  fs.rmSync(path.join(s.art, "task-9"));
+  s.clock.t += 7 * 3_600_000;
+  await s.watchOnce();
+  assert.equal(s.jobs[0].status, "succeeded");
+  assert.equal(s.rec.wakes.length, 2);
+  assert.match(s.rec.wakes[1].prompt, /501 .*finished: artifacts\/task-9\/story-501\.md/);
+  assert.equal(s.rec.wakes[1].key, s.rec.wakes[0].key);
+  assert.equal(s.rec.wakes[0].key, "loremax-wake:studio:illustrator:sess-1");
 });
 
 test("watcher after a restart: provenance and cost come from the job row's track() params", async () => {

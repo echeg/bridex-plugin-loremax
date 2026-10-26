@@ -1606,6 +1606,14 @@ function savedList(done) {
 /** A placeholder job row stands for a paid submission still under way: `submit:<uuid>`, never a generation. */
 const isSubmitRow = (externalId) => String(externalId ?? "").startsWith("submit:");
 
+/**
+ * The wake key of one conversation: every LoreMax wake for it shares this key, so
+ * the host merges the ones that land while the agent is busy into one pending wake.
+ * The workspace is in it because the host's merge lookup matches (key, agent) only;
+ * a wake without a session runs in the agent's service session, hence `service`.
+ */
+export const wakeKey = ({ workspace, agent, sessionKey }) => `loremax-wake:${workspace}:${agent}:${sessionKey || "service"}`;
+
 /** `opts` is for tests only (the host passes just ctx): poll interval, clock, sleep and a guide replacing the shipped GUIDE. */
 export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, sleep = realSleep, guide = GUIDE } = {}) {
   const lmx = createClient(ctx, { now, sleep });
@@ -1656,6 +1664,19 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * twice. Process-wide for the same reason as inFlight.
    */
   const submitting = (globalThis[Symbol.for("bridex.loremax.submitting")] ??= new Map());
+  /**
+   * Wake ids (job:<row>, save:<row>, submit:<id>) already sent in this process: one
+   * wake per outcome now that a conversation's wakes share a key and the host no
+   * longer drops a repeat by its per-row key. Process-wide for the same reason as inFlight.
+   */
+  const woken = (globalThis[Symbol.for("bridex.loremax.woken")] ??= new Set());
+  /** Wake the conversation `target` belongs to, once per `onceId`. */
+  const wakeOnce = (target, prompt, onceId) => {
+    if (!ctx.wakeAgent || woken.has(onceId)) return;
+    woken.add(onceId);
+    const { workspace, agent, sessionKey } = target;
+    ctx.wakeAgent({ workspace, agent, key: wakeKey(target), ...(sessionKey ? { sessionKey } : {}), prompt });
+  };
   /** Where a submission goes, for submitKey; a setting that is missing or invalid reads as null (the call then fails on it). */
   const submitTarget = () => {
     const read = (f) => {
@@ -2630,8 +2651,7 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
         const settled = ctx.jobs.find ? cur && cur.status !== "running" : !ctx.jobs.pending().some((p) => p.id === j.id);
         if (settled) continue;
         inFlight.add(j.externalId);
-        const wake = (prompt) =>
-          ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-job:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}), prompt });
+        const wake = (prompt) => wakeOnce(j, prompt, `job:${j.id}`);
         const what = `LoreMax generation ${j.externalId} (${j.model || "workflow"}${j.label ? ` — ${j.label}` : ""})`;
         const task = j.taskId ? ` (task ${j.taskId})` : "";
         try {
@@ -2670,9 +2690,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
                 wake(`${what} finished, but saving its outputs still failed after 6h: ${error} — it was given up; check it on LoreMax${task}.`);
               } else if (!unsaved.has(j.externalId)) {
                 unsaved.add(j.externalId);
-                // its own key: the row's key stays free for a wake with the files after a restart
-                ctx.wakeAgent?.({ workspace: j.workspace, agent: j.agent, key: `loremax-save:${j.id}`, ...(j.sessionKey ? { sessionKey: j.sessionKey } : {}),
-                  prompt: `${what} finished, but saving its outputs failed: ${error}${error.includes("loremax_result") ? "" : ` — fix that, then call loremax_result with generation_id ${j.externalId}`}${task}.` });
+                // its own once-id: the row's job: id stays free for the wake with the files once a save works
+                wakeOnce(j, `${what} finished, but saving its outputs failed: ${error}${error.includes("loremax_result") ? "" : ` — fix that, then call loremax_result with generation_id ${j.externalId}`}${task}.`, `save:${j.id}`);
               }
               continue;
             }

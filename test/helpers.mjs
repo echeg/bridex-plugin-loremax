@@ -9,6 +9,8 @@ export const z = new Proxy({}, { get: () => () => chain() });
 // each test file runs in its own process: its temp workspaces go when it exits
 const tempDirs = [];
 process.once("exit", () => tempDirs.forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+// job row ids are unique per process, like the host's: the plugin's once-per-row wake set is process-wide
+let seq = 0;
 
 /** A PluginContext double that records everything the plugin hands to the host. */
 export function fakeCtx({ config = {} } = {}) {
@@ -28,7 +30,6 @@ export function fakeCtx({ config = {} } = {}) {
     shutdown: [],
   };
   const jobs = [];
-  let seq = 0;
   const log = (level) => (msg) => rec.logs.push({ level, msg: String(msg) });
   const ctx = {
     name: "loremax",
