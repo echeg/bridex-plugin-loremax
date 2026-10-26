@@ -22,12 +22,11 @@ merge (`enqueueWakeup` concatenates a pending row's prompts). That does not cove
 - **Key scope.** The coalescing lookup matches `(key, agent, pending)` without the workspace (wakeups.ts:45), and the
   merged payload's other fields are overwritten by the last enqueue. Restart recovery moves `processing` back to
   `pending` (wakeups.ts:~278), so one key can have two pending rows.
-- **Retry budget.** A wake whose run failed transiently (usage limit, 429) goes back to `pending` with a backoff
-  `notBefore` and its `attempts` (wakeups.ts:~220). A merge into it resets `notBefore` to now but keeps `attempts`
-  (wakeups.ts:~72), so with the shared key every LoreMax finish during a usage-limit window reruns the merged row at
-  once and spends one retry; after `wakeup_retries` the row fails and takes every merged line with it. With per-row
-  keys each finish had its own budget and backoff. Fix in the host: a merge into a row with `attempts > 0` either
-  keeps its `notBefore` or starts a fresh budget. (found in internal review of 0.4.1, 2026-10-26, severity major)
+- ~~**Retry budget.**~~ Fixed in echeg/bridex `ab286a16` (plan 20261026-wakeup-merge-keeps-retry-backoff): a merge
+  into a background row waiting out a `finishWakeup` retry (`reason` "retrying in …") keeps its `notBefore`; chats and
+  holds reset as before. Before it, a merge reset the backoff but kept `attempts`, so during a 429/overload/network/auth
+  failure each LoreMax finish reran the shared-key row and spent a retry, and at `wakeup_retries` every merged line was
+  lost. Subscription limits were never affected on `main`: a limit is a hold that spends no attempts.
 
 Suggested direction, for all plugins at once: give each plugin event its own id plus a group key; let a plugin ack an
 event (its result reached the recipient, e.g. through `loremax_result`) so the executor drops acked events before a
