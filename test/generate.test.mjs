@@ -747,22 +747,26 @@ test("late submissions wake their own conversation: another session gets its own
   }
 });
 
-test("two late submissions of one session that fail both wake, on the conversation's one key", async () => {
+test("two alike late submissions of one session that fail both wake on the conversation's one key, each naming its submission", async () => {
   const s = await setup();
   const gate = held();
   restore = mockFetch([["POST", "/api/v2/workflow/execute", async () => {
     await gate.until;
     return jsonResponse({ error: "workflow crashed", status: "failed" }, 500);
   }]]).restore;
-  for (const note of ["one", "two"]) {
-    const replying = s.run({ workflow_id: "w", inputs: { prompt: note }, note });
+  // variants of one prompt share its note: only the submission's id tells their failures apart
+  for (const seed of [1, 2]) {
+    const replying = s.run({ workflow_id: "w", inputs: { prompt: "p", seed }, note: "hero" });
     await s.time.expire();
     assert.equal((await replying).status, "submitting");
   }
   gate.open();
   await eventually(() => s.rec.wakes.length === 2, "both wakes");
   assert.deepEqual(s.rec.wakes.map((w) => w.key), [KEY, KEY]);
-  assert.deepEqual(s.rec.wakes.map((w) => w.prompt.match(/^LoreMax w \((\w+)\) FAILED/)[1]).sort(), ["one", "two"]);
+  // the host drops a merged line equal to the pending prompt: the two must differ
+  assert.notEqual(s.rec.wakes[0].prompt, s.rec.wakes[1].prompt);
+  const ids = s.rec.wakes.map((w) => w.prompt.match(/^LoreMax w \(hero\) \[(submit:[0-9a-f-]{36})\] FAILED: .*workflow crashed/)[1]);
+  assert.deepEqual(ids.sort(), s.placeholders().map((p) => p.externalId).sort());
 });
 
 test("older core without wakeAgent: a slow download blocks the call as in 0.1.0 and is saved inline", async () => {

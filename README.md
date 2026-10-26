@@ -547,8 +547,13 @@ failed save's, a late submission's — uses one key,
 `loremax-wake:<workspace>:<agent>:<session>` (`service` when the call had no
 session). Bridex merges a wake into a pending one with the same key, so
 generations that finish while the agent is still busy reach it as one wake
-listing them all, not one run per generation. Each generation (and each
-submission) wakes the agent at most once per process. This does not cover an
+listing them all, not one run per generation. Each outcome wakes the agent at
+most once per process: a generation when it finishes, fails or is given up (and
+once before that if saving its outputs failed), a submission with its result.
+Bridex drops a merged line equal to the pending prompt, so a submission's line
+with no generation id names the submission —
+`LoreMax w (hero) [submit:<uuid>] FAILED: …` — and two alike failures stay two
+lines. This does not cover an
 idle agent — with no wake pending, each finish starts a run of its own — nor
 results already read with `loremax_result`: a wake queued before that still
 arrives. Both need host support, see `docs/backlog/host-plugin-wake-events.md`.

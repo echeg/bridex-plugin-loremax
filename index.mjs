@@ -1612,7 +1612,7 @@ const isSubmitRow = (externalId) => String(externalId ?? "").startsWith("submit:
  * The workspace is in it because the host's merge lookup matches (key, agent) only;
  * a wake without a session runs in the agent's service session, hence `service`.
  */
-export const wakeKey = ({ workspace, agent, sessionKey }) => `loremax-wake:${workspace}:${agent}:${sessionKey || "service"}`;
+const wakeKey = ({ workspace, agent, sessionKey }) => `loremax-wake:${workspace}:${agent}:${sessionKey || "service"}`;
 
 /** `opts` is for tests only (the host passes just ctx): poll interval, clock, sleep and a guide replacing the shipped GUIDE. */
 export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, sleep = realSleep, guide = GUIDE } = {}) {
@@ -2077,8 +2077,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     }
     const issues = r.issues?.length ? ` — issues: ${JSON.stringify(r.issues).slice(0, 1500)}` : "";
     return r.status === "rejected"
-      ? `${ph.what} was refused before it ran (not charged): ${r.error}${issues}. ${r.hint}${ph.task}.`
-      : `${ph.what} FAILED: ${r.error}${r.generation_id ? ` (generation ${r.generation_id})` : ""}. ${r.hint}${ph.task}.`;
+      ? `${ph.tagged} was refused before it ran (not charged): ${r.error}${issues}. ${r.hint}${ph.task}.`
+      : `${ph.tagged} FAILED: ${r.error}${r.generation_id ? ` (generation ${r.generation_id})` : ""}. ${r.hint}${ph.task}.`;
   }
 
   /** Reference paths → absolute files, all checked before anything is sent (or paid for). */
@@ -2167,7 +2167,10 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
     });
     inFlight.add(submitId);
     submitting.set(key, submitId);
-    return { submitId, key, trackedId, call, what: `LoreMax ${workflow ?? tool}${note ? ` (${note})` : ""}`, task: call.taskId ? ` (task ${call.taskId})` : "" };
+    const what = `LoreMax ${workflow ?? tool}${note ? ` (${note})` : ""}`;
+    // `tagged` heads the lines with no generation id: the conversation's wakes share one key and the host
+    // drops a line equal to the pending prompt, so two alike failures would reach the agent as one
+    return { submitId, key, trackedId, call, what, tagged: `${what} [${submitId}]`, task: call.taskId ? ` (task ${call.taskId})` : "" };
   }
 
   function settleSubmit(ph, status, { generationId, error } = {}) {
@@ -2298,8 +2301,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
   const lateFailure = (ph, e) => {
     const msg = String(e?.message ?? e);
     return e?.ambiguous
-      ? `${ph.what}: ${msg}${ph.task}.`
-      : `${ph.what} FAILED: ${msg}. Decide whether to retry (other inputs or workflow) or report the blocker${ph.task}.`;
+      ? `${ph.tagged}: ${msg}${ph.task}.`
+      : `${ph.tagged} FAILED: ${msg}. Decide whether to retry (other inputs or workflow) or report the blocker${ph.task}.`;
   };
 
   /**
@@ -2650,7 +2653,8 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
           // mid-submission: nothing to /check, LoreMax may or may not have charged it
           if (isSubmitRow(j.externalId)) {
             ctx.jobs.settle(j.id, { status: "failed", result: { workspace: j.workspace }, error: "the submission was interrupted by a restart" });
-            wake(`LoreMax ${j.model || "workflow"}${j.label ? ` (${j.label})` : ""}: the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again${task}.`);
+            // tagged with its id like a late submission's failure: alike placeholders must not merge into one line
+            wake(`LoreMax ${j.model || "workflow"}${j.label ? ` (${j.label})` : ""} [${j.externalId}]: the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again${task}.`);
             continue;
           }
           const expired = now() - Date.parse(j.createdAt) > GIVE_UP_MS;

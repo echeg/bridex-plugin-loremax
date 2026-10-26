@@ -100,6 +100,7 @@
 - [x] update `test/generate.test.mjs:499-500, 640, 679` to the new key
 - [x] write tests: a late submission (REST and profile) and a background save for the same session as a watcher-woken job share its key
 - [x] write tests: a background save that woke for a row is not woken again by a following `watchOnce`; a late submission that fails still wakes (error path)
+- [x] ➕ (review) a submission's lines with no generation id (late failure, profile refusal, interrupted by a restart) name the submission, `[submit:<uuid>]`: the host drops a merged line equal to the pending prompt, so alike failures sharing the key would reach the agent as one — the only prompt change
 - [x] run `npm test` - must pass before task 3
 
 ### Task 3: Verify acceptance criteria

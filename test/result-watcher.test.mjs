@@ -201,7 +201,8 @@ test("watcher: wakes share one key per conversation — another session, workspa
   s.track({ externalId: "503", sessionKey: "sess-2" });
   s.track({ externalId: "504", workspace: "other" });
   s.track({ externalId: "505", agent: "writer" });
-  s.track({ externalId: "506", sessionKey: undefined });
+  // the host stores a session-less row's sessionKey as null
+  s.track({ externalId: "506", sessionKey: null });
   const f = mockFetch([["POST", /\/api\/v2\/generations\/\d+\/check/, () => ({ status: "failed", error: "GPU OOM" })]]);
   restore = f.restore;
   await s.watchOnce();
@@ -233,6 +234,25 @@ test("watcher: a row woken once is not woken again in this process, even when a 
   await s.watchOnce();
   // checked again, but its outcome was already woken
   assert.equal(f.calls.length, 2);
+  assert.equal(s.rec.wakes.length, 1);
+});
+
+test("watcher: a re-activated plugin retrying a failed save does not wake for it again", async () => {
+  const s = await setup();
+  s.track({ model: "story" });
+  fs.mkdirSync(s.art, { recursive: true });
+  fs.writeFileSync(path.join(s.art, "task-9"), "not a folder");
+  const f = mockFetch([checkRoute(s, [{ status: "completed", result: { originalUrls: [], previewUrls: [], contentTypes: [], textContent: "The end." } }])]);
+  restore = f.restore;
+  await s.watchOnce();
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /saving its outputs failed/);
+  // an update or dashboard toggle: the fresh instance does not know the save already failed here
+  const fresh = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+  await fresh.watchOnce();
+  // it checked and tried the save again, but that failure was already woken in this process
+  assert.equal(f.calls.length, 2);
+  assert.equal(s.jobs[0].status, "running");
   assert.equal(s.rec.wakes.length, 1);
 });
 
@@ -821,7 +841,7 @@ test("watcher: a submit: placeholder left by a dead process is settled failed an
   assert.match(s.jobs[0].error, /interrupted by a restart/);
   assert.equal(s.rec.wakes.length, 1);
   assert.equal(s.rec.wakes[0].sessionKey, "sess-1");
-  assert.match(s.rec.wakes[0].prompt, /LoreMax kling \(hero\): the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again \(task task-9\)/);
+  assert.match(s.rec.wakes[0].prompt, /LoreMax kling \(hero\) \[submit:7d3c\]: the submission was interrupted by a restart; it may have been charged — check LoreMax history before running it again \(task task-9\)/);
   await fresh.watchOnce();
   assert.equal(s.rec.wakes.length, 1);
   // loremax_result does not treat it as a generation
