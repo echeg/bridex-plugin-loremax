@@ -1670,12 +1670,15 @@ export default async function activate(ctx, { pollMs = POLL_MS, now = Date.now, 
    * longer drops a repeat by its per-row key. Process-wide for the same reason as inFlight.
    */
   const woken = (globalThis[Symbol.for("bridex.loremax.woken")] ??= new Set());
-  /** Wake the conversation `target` belongs to, once per `onceId`. */
+  /**
+   * Wake the conversation `target` belongs to, once per `onceId`. The id is kept
+   * only once the host took the wake: an enqueue that throws leaves a retry free to send it.
+   */
   const wakeOnce = (target, prompt, onceId) => {
     if (!ctx.wakeAgent || woken.has(onceId)) return;
-    woken.add(onceId);
     const { workspace, agent, sessionKey } = target;
     ctx.wakeAgent({ workspace, agent, key: wakeKey(target), ...(sessionKey ? { sessionKey } : {}), prompt });
+    woken.add(onceId);
   };
   /** Where a submission goes, for submitKey; a setting that is missing or invalid reads as null (the call then fails on it). */
   const submitTarget = () => {

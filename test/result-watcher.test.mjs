@@ -256,6 +256,29 @@ test("watcher: a re-activated plugin retrying a failed save does not wake for it
   assert.equal(s.rec.wakes.length, 1);
 });
 
+test("watcher: a save-failure wake the host failed to enqueue is sent by a re-activated plugin retrying the save", async () => {
+  const s = await setup();
+  s.track({ model: "story" });
+  fs.mkdirSync(s.art, { recursive: true });
+  fs.writeFileSync(path.join(s.art, "task-9"), "not a folder");
+  const f = mockFetch([checkRoute(s, [{ status: "completed", result: { originalUrls: [], previewUrls: [], contentTypes: [], textContent: "The end." } }])]);
+  restore = f.restore;
+  // the host's enqueue is a database write: it can throw (locked, disk full)
+  const wakeAgent = s.ctx.wakeAgent;
+  s.ctx.wakeAgent = () => {
+    throw new Error("database is locked");
+  };
+  await s.watchOnce();
+  assert.equal(s.rec.wakes.length, 0);
+  s.ctx.wakeAgent = wakeAgent;
+  const fresh = await activate(s.ctx, { pollMs: 1, now: () => s.clock.t });
+  await fresh.watchOnce();
+  assert.equal(f.calls.length, 2);
+  assert.equal(s.jobs[0].status, "running");
+  assert.equal(s.rec.wakes.length, 1);
+  assert.match(s.rec.wakes[0].prompt, /saving its outputs failed/);
+});
+
 test("watcher: a save failure then a successful save wake twice, on the conversation's one key", async () => {
   const s = await setup();
   s.track({ model: "story" });
