@@ -103,10 +103,10 @@
 - [x] run `npm test` - must pass before task 3
 
 ### Task 3: Verify acceptance criteria
-- [ ] verify no `ctx.wakeAgent(` call is left outside `wakeOnce` (`grep -n "wakeAgent" index.mjs`)
-- [ ] verify every wake prompt is unchanged apart from its key (diff of the prompt template strings)
-- [ ] verify a core without `ctx.wakeAgent` still loads and blocks as before (existing older-core tests pass)
-- [ ] run full test suite (`npm test`)
+- [x] verify no `ctx.wakeAgent(` call is left outside `wakeOnce` (`grep -n "wakeAgent" index.mjs`)
+- [x] verify every wake prompt is unchanged apart from its key (diff of the prompt template strings)
+- [x] verify a core without `ctx.wakeAgent` still loads and blocks as before (existing older-core tests pass)
+- [x] run full test suite (`npm test`)
 
 ### Task 4: [Final] Update documentation and version
 - [ ] README.md: in the background-save / watcher sections, state that wakes share one key per conversation, so finishes that land while the agent is busy reach it as one wake; name what it does not cover (an idle agent, results already read) with a pointer to the backlog
